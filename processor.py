@@ -4,7 +4,7 @@ Multi-Core Parallel + Sub-Macroblock Symmetric Bridge + Glare Roll-Off Recovery 
 """
 
 from __future__ import annotations
-import os, time
+import os, time, ctypes
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, Optional, Tuple, List

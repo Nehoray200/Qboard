@@ -11,6 +11,7 @@ from ui.theme import (CLR_BG_ROOT, CLR_BG_TOOLBAR, CLR_BORDER, CLR_ACCENT, CLR_T
                      FONT_FAMILY, FONT_BODY_BOLD, FONT_BADGE, set_window_capture_passthrough, set_window_click_through)
 from ui.modals import WindowPickerModal, ScreenRegionSelector, ScreenPickerModal, BoardPointSelector
 from ui.hotkeys import GlobalHotkeyManager, bind_local_shortcuts
+from pipeline import FramePipeline
 
 def _get_app_dir() -> str:
     for c in (os.path.join(os.environ.get("APPDATA") or "", "Qboard"), os.path.join(os.path.expanduser("~"), ".qboard"),
@@ -31,11 +32,8 @@ class ZoomPlusApp:
     """Seamless, distraction-free Zoom whiteboard enhancement overlay."""
 
     def __init__(self, root: Optional[tk.Tk] = None, headless: bool = False) -> None:
-        self.headless = headless
-        self.root = tk.Tk() if root is None else root
-        init_dpi_awareness()
-
-        self.enhancer = WhiteboardEnhancer()
+        self.headless, self.root = headless, (tk.Tk() if root is None else root)
+        init_dpi_awareness(); self.enhancer = WhiteboardEnhancer()
         self.capture_manager = LiveCaptureManager(mode="screen" if not self.headless else "demo")
         self.current_preset, self.current_params = "clean_board", PRESETS["clean_board"].copy()
         self.view_mode, self.split_ratio, self.loupe_enabled, self.crop_mode, self.is_paused = "enhanced", 0.50, False, False, False
@@ -54,8 +52,9 @@ class ZoomPlusApp:
         self.hotkey_mgr = GlobalHotkeyManager(self, poll_interval_ms=40)
         self.apply_preset("clean_board", update_sliders=True)
         if not self.headless: self.load_settings()
+        self.pipeline = FramePipeline(self.capture_manager.capture_frame, lambda f: self.enhancer.enhance(f, self.current_params))
         if self.headless: self.root.withdraw()
-        else: self.root.after(50, self._video_tick); self.hotkey_mgr.start()
+        else: self.pipeline.start(); self.root.after(40, self._video_tick); self.hotkey_mgr.start()
 
     def _init_variables(self) -> None:
         p = self.current_params
@@ -64,13 +63,11 @@ class ZoomPlusApp:
                  ("ink_saturation", p.ink_saturation, "{:.3f}"), ("gamma", p.gamma, "{:.2f}"), ("sharpen", p.sharpen, "{:.1f}")]
         self._slider_map = {k: (tk.DoubleVar(value=v), tk.StringVar(value=f.format(v)), f) for k, v, f in specs}
         for k, (var, lbl, _) in self._slider_map.items(): setattr(self, f"var_{k}", var); setattr(self, f"lbl_{k}_val", lbl)
-        self.var_fast_mode, self.var_preserve_instructor = tk.BooleanVar(value=p.fast_mode), tk.BooleanVar(value=p.preserve_instructor)
-        self.var_invert_dark_mode, self.var_denoise = tk.BooleanVar(value=p.invert_dark_mode), tk.BooleanVar(value=p.denoise)
-        self.var_simulate_live, self.var_trim_browser_header = tk.BooleanVar(value=self.capture_manager.simulate_live), tk.BooleanVar(value=False)
+        self.var_fast_mode, self.var_preserve_instructor, self.var_invert_dark_mode = tk.BooleanVar(value=p.fast_mode), tk.BooleanVar(value=p.preserve_instructor), tk.BooleanVar(value=p.invert_dark_mode)
+        self.var_denoise, self.var_simulate_live, self.var_trim_browser_header = tk.BooleanVar(value=p.denoise), tk.BooleanVar(value=self.capture_manager.simulate_live), tk.BooleanVar(value=False)
         self.var_exclude_capture, self.var_always_on_top, self.var_click_through = tk.BooleanVar(value=True), tk.BooleanVar(value=False), tk.BooleanVar(value=True)
-        self.stat_source, self.stat_fps = tk.StringVar(value="מקור: מסך נוכחי (לכידה חיה)"), tk.StringVar(value="⚡ 0.0 FPS")
-        self.stat_latency, self.stat_whiteness = tk.StringVar(value="⏱️ 0.0ms"), tk.StringVar(value="⚪ הלבנת רקע: --%")
-        self.stat_contrast, self.stat_sharpness = tk.StringVar(value="📊 שיפור ניגודיות: --"), tk.StringVar(value="✨ שיפור חדות: --")
+        self.stat_source, self.stat_fps, self.stat_latency = tk.StringVar(value="מקור: מסך נוכחי"), tk.StringVar(value="⚡ 0.0 FPS"), tk.StringVar(value="⏱️ 0.0ms")
+        self.stat_whiteness, self.stat_contrast, self.stat_sharpness = tk.StringVar(value="⚪ הלבנת רקע: --%"), tk.StringVar(value="📊 ניגודיות: --"), tk.StringVar(value="✨ חדות: --")
         self.stat_toast, self.preset_desc_var = tk.StringVar(value="🟢 Qboard מוכן לשידור"), tk.StringVar(value=PRESET_INFO["clean_board"]["desc_he"])
 
     def _build_ui(self) -> None:
@@ -249,9 +246,17 @@ class ZoomPlusApp:
             if not self.headless and self.root.winfo_exists(): self.root.after(200, self._video_tick)
             return
         if not self.is_paused:
-            try: self.process_single_frame()
-            except Exception as e: logger.error(f"Frame error: {e}")
-        if not self.headless and self.root.winfo_exists(): self.root.after(15, self._video_tick)
+            item = self.pipeline.get_latest_frame()
+            if item is not None:
+                self.current_frame_orig, self.current_frame_enhanced = item
+                self.current_processed_frame = self.enhancer.create_comparison_view(self.current_frame_orig, self.current_frame_enhanced, self.split_ratio) if self.view_mode == "split" else (self.current_frame_orig if self.view_mode == "original" else self.current_frame_enhanced)
+                if not self.headless: self._render_current_frame_to_canvas()
+                self.stat_fps.set(f"⚡ {self.pipeline.process_fps:.1f} FPS")
+                self.stat_latency.set(f"⏱️ לכידה: {self.pipeline.last_capture_ms:.1f}ms | עיבוד: {self.pipeline.last_process_ms:.1f}ms")
+            elif self.headless:
+                try: self.process_single_frame()
+                except Exception as e: logger.error(f"Frame error: {e}")
+        if not self.headless and self.root.winfo_exists(): self.root.after(12, self._video_tick)
 
     def apply_preset(self, preset_name: str, update_sliders: bool = True) -> None:
         if preset_name not in PRESETS: return
@@ -406,9 +411,7 @@ class ZoomPlusApp:
     def toggle_capture_passthrough(self) -> None: self.var_exclude_capture.set(not self.var_exclude_capture.get()); self._on_toggle_change("exclude_capture")
     def toggle_always_on_top(self) -> None: st = not self.var_always_on_top.get(); self.var_always_on_top.set(st); self.root.attributes("-topmost", st); self.show_toast("📌 נעוץ מעל כל החלונות" if st else "🔓 ביטול נעיצה")
     def toggle_trim_browser_header(self) -> None: st = not self.var_trim_browser_header.get(); self.var_trim_browser_header.set(st); self.capture_manager.trim_browser_header = st; self.show_toast("✂️ הסתרת כרטיסיות דפדפן פעילה" if st else "כרטיסיות דפדפן גלויות")
-    def set_click_through_mode(self, enabled: bool) -> None:
-        self.click_through_enabled = enabled; self.var_click_through.set(enabled); set_window_click_through(self.root, enabled)
-        self.show_toast("🖱️ שקוף לזום: לחיצות ומקש רווח פעילים" if enabled else "✋ מצב עכבר: ניתן לגרור סרגל השוואה")
+    def set_click_through_mode(self, enabled: bool) -> None: self.click_through_enabled = enabled; self.var_click_through.set(enabled); set_window_click_through(self.root, enabled); self.show_toast("🖱️ שקוף לזום: לחיצות ומקש רווח פעילים" if enabled else "✋ מצב עכבר: ניתן לגרור סרגל השוואה")
     def toggle_click_through(self) -> None: self.set_click_through_mode(not self.click_through_enabled)
 
     def hotkey_toggle_zoom_overlay(self) -> None:
@@ -441,7 +444,6 @@ class ZoomPlusApp:
         self.apply_preset(keys[(keys.index(self.current_preset) + 1) % len(keys)] if self.current_preset in keys else keys[0], update_sliders=True)
     def quick_snapshot(self) -> str:
         saved = self.save_snapshot(); self.show_toast(f"📸 נשמר צילום לוח [F8]: {os.path.basename(saved)}"); return saved
-
     def load_settings(self) -> None:
         if not os.path.exists(_SETTINGS_FILE): return
         try:
@@ -455,7 +457,6 @@ class ZoomPlusApp:
             if d.get("last_locked_geometry"): self._last_locked_geometry = d["last_locked_geometry"]
             if d.get("last_source_type") and d["last_source_type"] not in ("demo",): self.active_source_type = d["last_source_type"]
         except Exception as e: logger.warning(f"Settings load: {e}")
-
     def save_settings(self) -> None:
         if self.headless: return
         try:
@@ -466,11 +467,9 @@ class ZoomPlusApp:
                  "last_source_type": self.active_source_type, "last_locked_geometry": self._last_locked_geometry}
             with open(_SETTINGS_FILE, "w", encoding="utf-8") as f: json.dump(d, f, indent=2)
         except Exception as e: logger.warning(f"Settings save: {e}")
-
     def quit_app(self) -> None:
-        try: self.save_settings(); self.hotkey_mgr.stop(); self.settings_window and self.settings_window.winfo_exists() and self.settings_window.destroy(); self.root.destroy()
+        try: hasattr(self, "pipeline") and self.pipeline.stop(); self.save_settings(); self.hotkey_mgr.stop(); self.settings_window and self.settings_window.winfo_exists() and self.settings_window.destroy(); self.root.destroy()
         except Exception: pass
-
     def _on_escape(self) -> None:
         if self.crop_mode: self.toggle_crop_mode(); return
         if self.loupe_enabled: self.toggle_loupe(); return
@@ -478,11 +477,8 @@ class ZoomPlusApp:
             try: self.settings_window.on_close(); return
             except Exception: pass
         self.overlay_visible = False; self.root.withdraw()
-
     toggle_quick_launch, toggle_settings, cycle_preset, hotkey_quick_snapshot = hotkey_toggle_zoom_overlay, toggle_settings_window, cycle_next_preset, quick_snapshot
     def run(self) -> None: self.root.mainloop()
 QboardApp = ZoomPlusApp
-def run_self_test(*args, **kwargs) -> int:
-    import tests_runner; return tests_runner.run_self_test(*args, **kwargs)
-if __name__ == "__main__":
-    sys.exit(run_self_test()) if "--self-test" in sys.argv else ZoomPlusApp().run()
+def run_self_test(*args, **kwargs) -> int: import tests_runner; return tests_runner.run_self_test(*args, **kwargs)
+if __name__ == "__main__": sys.exit(run_self_test()) if "--self-test" in sys.argv else ZoomPlusApp().run()
