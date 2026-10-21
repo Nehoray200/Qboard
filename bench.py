@@ -145,6 +145,24 @@ def run_benchmark(iterations: int = 10) -> dict:
     t_full = (time.perf_counter() - t0) / min(5, iterations) * 1000.0
     print(f"  Fullscreen capture avg:     {t_full:.2f} ms")
 
+    # C. Temporal Stability Benchmark (Anti-Flicker)
+    print("\n--- Temporal Anti-Flicker Stability ---")
+    noisy_frames = [create_realistic_test_frame(1024, 576, seed=s) for s in range(5)]
+    p_stab = PRESETS["clean_board"].copy(temporal_stability=True)
+    p_raw = PRESETS["clean_board"].copy(temporal_stability=False)
+
+    e_stab = WhiteboardEnhancer()
+    outs_stab = [np.asarray(e_stab.enhance(f, p_stab).convert("L"), dtype=np.float32) for f in noisy_frames]
+    std_stab = float(np.mean(np.std(np.stack(outs_stab, axis=0), axis=0)))
+
+    e_raw = WhiteboardEnhancer()
+    outs_raw = [np.asarray(e_raw.enhance(f, p_raw).convert("L"), dtype=np.float32) for f in noisy_frames]
+    std_raw = float(np.mean(np.std(np.stack(outs_raw, axis=0), axis=0)))
+
+    stability_gain = (1.0 - std_stab / max(std_raw, 0.001)) * 100.0
+    print(f"  Pixel Noise StdDev (Without Anti-Flicker): {std_raw:.2f}")
+    print(f"  Pixel Noise StdDev (With Anti-Flicker)   : {std_stab:.2f} (Shimmer reduction: {stability_gain:.1f}%)")
+
     print("\n" + "=" * 68)
     return results
 
