@@ -30,6 +30,7 @@ SLIDERS_META = [
     ("contrast", "ניגודיות והדגשת דיו (Contrast)", 0.5, 4.0, 0.05, "{:.2f}", 1.65),
     ("thickening", "עיבוי עצמים וכתב (Thickening)", 0.0, 2.0, 0.05, "{:.2f}", 0.15),
     ("glare_removal", "ניקוי בוהק והשתקפויות (Glare)", 0.0, 1.0, 0.02, "{:.2f}", 0.90),
+    ("shadow_suppression", "סינון צלליות מרצה (Shadow Filter)", 0.0, 1.5, 0.05, "{:.2f}", 0.85),
     ("white_threshold", "סף הלבנת לוח (White Thresh)", 0.002, 0.060, 0.001, "{:.3f}", 0.012),
     ("ink_saturation", "רוויית עומק טוש (Ink Saturation)", 0.03, 0.22, 0.005, "{:.3f}", 0.145),
     ("gamma", "תיקון גאמה (Gamma)", 0.5, 2.5, 0.05, "{:.2f}", 1.12),
@@ -80,12 +81,9 @@ class SettingsWindow(tk.Toplevel):
         try: ctypes.windll.user32.BringWindowToTop(wintypes.HWND(self.winfo_id()))
         except Exception: pass
 
-        self.preset_buttons: Dict[str, tk.Button] = {}
-        self.monitor_buttons: Dict[int, tk.Button] = {}
-        self.source_buttons: Dict[str, tk.Button] = {}
-        self.slider_widgets: Dict[str, tk.Scale] = {}
-        self._slider_vars: Dict[str, Tuple[tk.DoubleVar, tk.StringVar, str]] = {}
-        self._toggle_vars: Dict[str, tk.BooleanVar] = {}
+        self.preset_buttons: Dict[str, tk.Button] = {}; self.monitor_buttons: Dict[int, tk.Button] = {}
+        self.source_buttons: Dict[str, tk.Button] = {}; self.slider_widgets: Dict[str, tk.Scale] = {}
+        self._slider_vars: Dict[str, Tuple[tk.DoubleVar, tk.StringVar, str]] = {}; self._toggle_vars: Dict[str, tk.BooleanVar] = {}
 
         self._init_state_vars()
         self._build_ui()

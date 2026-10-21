@@ -19,6 +19,7 @@ class EnhancementParams:
     contrast: float = 1.65           # ink darkness / contrast stretch (0.5 to 4.0)
     thickening: float = 0.15         # morphological stroke dilation (0.0 to 2.0)
     glare_removal: float = 0.90      # illumination envelope strength (0.0 to 1.0)
+    shadow_suppression: float = 0.85 # broad shadow & penumbra suppression (0.0 to 1.5)
     white_threshold: float = 0.012   # hysteresis noise floor for white board (0.002 to 0.08)
     ink_saturation: float = 0.145    # difference for 100% ink opacity (0.03 to 0.25)
     gamma: float = 1.12              # gamma curve on extracted ink mask (0.5 to 2.5)
@@ -43,11 +44,11 @@ class EnhancementParams:
 
 
 PRESETS: Dict[str, EnhancementParams] = {
-    "clean_board": EnhancementParams(preset="clean_board", contrast=1.65, thickening=0.15, glare_removal=0.90, white_threshold=0.012, ink_saturation=0.145, gamma=1.12, sharpen=1.25, fast_mode=False, dual_sharpen=True),
-    "ultra_bold": EnhancementParams(preset="ultra_bold", contrast=2.05, thickening=0.65, glare_removal=0.92, white_threshold=0.011, ink_saturation=0.115, gamma=1.18, sharpen=1.50, fast_mode=False, dual_sharpen=True),
-    "color_markers": EnhancementParams(preset="color_markers", contrast=1.55, thickening=0.12, glare_removal=0.88, white_threshold=0.012, ink_saturation=0.155, gamma=1.08, sharpen=1.15, fast_mode=False, dual_sharpen=True),
-    "dark_board": EnhancementParams(preset="dark_board", contrast=1.75, thickening=0.25, glare_removal=0.90, white_threshold=0.012, ink_saturation=0.140, gamma=1.14, sharpen=1.30, invert_dark_mode=True, fast_mode=False, dual_sharpen=True),
-    "raw_contrast": EnhancementParams(preset="raw_contrast", contrast=1.30, thickening=0.0, glare_removal=0.60, white_threshold=0.016, ink_saturation=0.175, gamma=1.02, sharpen=0.95, fast_mode=False, dual_sharpen=False),
+    "clean_board": EnhancementParams(preset="clean_board", contrast=1.65, thickening=0.15, glare_removal=0.90, shadow_suppression=0.85, white_threshold=0.012, ink_saturation=0.145, gamma=1.12, sharpen=1.25, fast_mode=False, dual_sharpen=True),
+    "ultra_bold": EnhancementParams(preset="ultra_bold", contrast=2.05, thickening=0.65, glare_removal=0.92, shadow_suppression=0.90, white_threshold=0.011, ink_saturation=0.115, gamma=1.18, sharpen=1.50, fast_mode=False, dual_sharpen=True),
+    "color_markers": EnhancementParams(preset="color_markers", contrast=1.55, thickening=0.12, glare_removal=0.88, shadow_suppression=0.75, white_threshold=0.012, ink_saturation=0.155, gamma=1.08, sharpen=1.15, fast_mode=False, dual_sharpen=True),
+    "dark_board": EnhancementParams(preset="dark_board", contrast=1.75, thickening=0.25, glare_removal=0.90, shadow_suppression=0.80, white_threshold=0.012, ink_saturation=0.140, gamma=1.14, sharpen=1.30, invert_dark_mode=True, fast_mode=False, dual_sharpen=True),
+    "raw_contrast": EnhancementParams(preset="raw_contrast", contrast=1.30, thickening=0.0, glare_removal=0.60, shadow_suppression=0.50, white_threshold=0.016, ink_saturation=0.175, gamma=1.02, sharpen=0.95, fast_mode=False, dual_sharpen=False),
 }
 
 PRESET_INFO: Dict[str, Dict[str, str]] = {
@@ -79,6 +80,7 @@ class WhiteboardEnhancer:
         self._dark_gate_lut: List[int] = [min(255, max(0, (128 - i) * 10)) for i in range(256)]
         self._dark_lut: List[int] = [min(255, max(0, (132 - i) * 8)) for i in range(256)]
         self._dilate1_lut: List[int] = [min(255, int(i * 2.6)) for i in range(256)]
+        self._shadow_135_lut: List[int] = [min(255, int(i * 1.35)) for i in range(256)]
 
         # Delta-frame & temporal envelope caches
         self._last_thumb: Optional[np.ndarray] = None
@@ -193,7 +195,7 @@ class WhiteboardEnhancer:
         params_key = None
         if params.fast_mode:
             thumb_arr = np.asarray(src_img.convert("L").resize((128, 72), Image.Resampling.BILINEAR), dtype=np.int16)
-            params_key = (w, h, max_process_width, params.preset, round(params.contrast, 3), round(params.thickening, 3), round(params.glare_removal, 3), round(params.white_threshold, 4), round(params.ink_saturation, 4), round(params.gamma, 3), round(params.sharpen, 2), params.preserve_instructor, params.invert_dark_mode, params.denoise)
+            params_key = (w, h, max_process_width, params.preset, round(params.contrast, 3), round(params.thickening, 3), round(params.glare_removal, 3), round(getattr(params, "shadow_suppression", 0.85), 3), round(params.white_threshold, 4), round(params.ink_saturation, 4), round(params.gamma, 3), round(params.sharpen, 2), params.preserve_instructor, params.invert_dark_mode, params.denoise)
             if self._last_thumb is not None and self._last_params_key == params_key and self._last_enhanced_out is not None and self._cache_age < 12:
                 diff_t = np.abs(thumb_arr - self._last_thumb)
                 if float(np.max(diff_t.reshape(6, 12, 8, 16).mean(axis=(1, 3)))) <= 2.8 and float(np.mean(diff_t)) <= 0.45:
@@ -233,14 +235,22 @@ class WhiteboardEnhancer:
         else:
             bg_env, glare_zone = self._cached_bg_env, self._cached_glare_zone
 
-        # 4. Exact 3x3 Sum Neighborhood Gate & Specular Glare Compensation
+        # 4. Exact 3x3 Sum Neighborhood Gate, Glare Compensation & Broad Shadow Suppression
         diff = ImageChops.subtract(bg_env, gray)
-        sum_3x3 = diff.point(self._x9_lut).filter(ImageFilter.BoxBlur(1))
+        s_supp = float(getattr(params, "shadow_suppression", 0.85))
+        if s_supp > 0.05:
+            w16, h16 = max(1, pw // 16), max(1, ph // 16)
+            broad_diff = diff.resize((w16, h16), Image.Resampling.BILINEAR).filter(ImageFilter.BoxBlur(2)).resize((pw, ph), Image.Resampling.BILINEAR)
+            broad_scaled = broad_diff.point(self._shadow_135_lut) if abs(s_supp - 0.85) < 0.02 else broad_diff.point([min(255, int(i * s_supp * 1.58)) for i in range(256)])
+            diff_clean = ImageChops.subtract(diff, broad_scaled)
+        else:
+            diff_clean = diff
+        sum_3x3 = diff_clean.point(self._x9_lut).filter(ImageFilter.BoxBlur(1))
         co_gate = sum_3x3.point(self._co_gate_exact_lut)
         cohesion_boost = sum_3x3.point(self._cohesion_lut)
-        cohesion_masked = ImageChops.multiply(cohesion_boost, diff.point(self._has_ink_lut))
+        cohesion_masked = ImageChops.multiply(cohesion_boost, diff_clean.point(self._has_ink_lut))
         glare_boost = ImageChops.multiply(sum_3x3.point(self._glare_diff_lut), glare_zone)
-        diff_adaptive = ImageChops.multiply(ImageChops.add(diff, ImageChops.add(cohesion_masked, glare_boost)), co_gate)
+        diff_adaptive = ImageChops.multiply(ImageChops.add(diff_clean, ImageChops.add(cohesion_masked, glare_boost)), co_gate)
 
         # 5. Multi-Core Parallel 2x SSAA Natural Grayscale Tone Mapping
         lut = self._get_ink_lut(params.white_threshold, params.ink_saturation, params.gamma, params.contrast)
