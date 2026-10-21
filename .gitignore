@@ -1,0 +1,102 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Local Qboard / Zoom+ runtime data, logs & settings
+.qboard/
+.zoomplus/
+*.log
+qboard.log
+zoomplus.log
+qboard_settings.json
+zoom_plus_settings.json
+settings.json
+
+# Local user whiteboard snapshots & test images (keep .gitkeep in captures/)
+captures/*.png
+captures/*.jpg
+captures/*.jpeg
+!captures/.gitkeep
+sample_zoom.png
+demo_*.png
+*.png
+
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.swo
+
+# Temporary scratch & test artifacts
+scratch/
+temp/
+*.tmp

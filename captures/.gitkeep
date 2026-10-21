@@ -1,0 +1,2 @@
+# This file ensures the captures/ directory is tracked in Git.
+# User whiteboard snapshots (*.png) are excluded via .gitignore.
