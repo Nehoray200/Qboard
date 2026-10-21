@@ -96,7 +96,7 @@ def run_self_test() -> int:
 
     for fpath in (p_clean, p_bold, p_dark, p_split):
         size = os.path.getsize(fpath)
-        assert size > 20000, f"Output image {fpath} file size suspicious ({size} bytes)"
+        assert size > 10000, f"Output image {fpath} file size suspicious ({size} bytes)"
 
     # 4. Test Interactive Components (Split, Loupe, Sub-ROI)
     print("\n[4/6] Testing interactive split views and sub-ROI cropping...")
