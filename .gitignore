@@ -87,6 +87,7 @@ demo_*.png
 ehthumbs.db
 Thumbs.db
 desktop.ini
+*.lnk
 
 # IDEs & Editors
 .vscode/
