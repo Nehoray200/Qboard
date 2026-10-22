@@ -140,18 +140,12 @@ class ZoomPlusApp:
         self.hotkey_mgr = GlobalHotkeyManager(self, poll_interval_ms=40)
         self.apply_preset("clean_board", update_sliders=True)
 
-        self.pipeline = FramePipeline(
-            capture_fn=self._pipeline_capture_fn,
-            process_fn=self._pipeline_process_fn,
-        )
-
         if not self.headless:
             self.load_settings()
 
         if self.headless:
             self.root.withdraw()
         else:
-            self.pipeline.start()
             self.root.after(50, self._video_tick)
             self.hotkey_mgr.start()
 
@@ -442,45 +436,7 @@ class ZoomPlusApp:
                 self.root.after(200, self._video_tick)
             return
 
-        if not self.is_paused and hasattr(self, "pipeline") and self.pipeline.running:
-            item = self.pipeline.get_latest_frame()
-            if item is not None:
-                raw_frame, processed_frame = item
-                self._frame_seq += 1
-                self.current_frame_orig = raw_frame
-                self.current_frame_enhanced = (
-                    processed_frame if self.view_mode != "original" else None
-                )
-                self.current_processed_frame = processed_frame
-
-                if (
-                    self.current_frame_orig
-                    and self.current_frame_enhanced
-                    and (self.capture_manager.frame_count % 15 == 0)
-                ):
-                    m = self.enhancer.compute_metrics(
-                        self.current_frame_orig, self.current_frame_enhanced
-                    )
-                    self.latest_metrics = m
-                    self.stat_whiteness.set(
-                        f"⚪ הלבנת רקע: {m['background_whiteness_pct']}%"
-                    )
-                    self.stat_contrast.set(
-                        f"📊 ניגודיות: x{m['contrast_improvement']}"
-                    )
-                    self.stat_sharpness.set(
-                        f"✨ חדות: x{m['sharpness_improvement']}"
-                    )
-
-                fps = self.pipeline.process_fps or self.pipeline.capture_fps
-                self.stat_fps.set(f"⚡ {fps:.1f} FPS")
-                self.stat_latency.set(
-                    f"⏱️ לכידה: {self.pipeline.last_capture_ms:.1f}ms | עיבוד: {self.pipeline.last_process_ms:.1f}ms"
-                )
-
-                if not self.headless:
-                    self._render_current_frame_to_canvas()
-        elif not self.is_paused:
+        if not self.is_paused:
             try:
                 self.process_single_frame()
             except Exception as e:

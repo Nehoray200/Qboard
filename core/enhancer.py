@@ -79,6 +79,9 @@ class WhiteboardEnhancer:
         self._cached_glare_zone: Optional[Image.Image] = None
         self._cached_env_key: Optional[Tuple] = None
         self._env_tick: int = 0
+        self._cached_white_bg: Optional[Image.Image] = None
+        self._cached_dark_bg: Optional[Image.Image] = None
+        self._ink_scale_lut: List[int] = [int(i * 0.14) for i in range(256)] * 3
 
     def _get_ink_lut(
         self,
@@ -159,9 +162,9 @@ class WhiteboardEnhancer:
                 arr_diff = np.asarray(diff)
                 arr_glare = np.asarray(glare_zone)
                 if shadow_suppression > 0.05:
-                    w16, h16 = max(1, pw // 16), max(1, ph // 16)
-                    small_diff = cv2.resize(arr_diff, (w16, h16), interpolation=cv2.INTER_LINEAR)
-                    blurred_small = cv2.blur(small_diff, (5, 5))
+                    w8, h8 = max(1, pw // 8), max(1, ph // 8)
+                    small_diff = cv2.resize(arr_diff, (w8, h8), interpolation=cv2.INTER_LINEAR)
+                    blurred_small = cv2.blur(small_diff, (9, 9))
                     broad_cv = cv2.resize(blurred_small, (pw, ph), interpolation=cv2.INTER_LINEAR)
                     if abs(shadow_suppression - 0.85) < 0.02:
                         broad_scaled = cv2.LUT(broad_cv, self._lut_shadow_arr)
@@ -323,9 +326,9 @@ class WhiteboardEnhancer:
         w4, h4 = max(1, pw // 4), max(1, ph // 4)
         w8, h8 = max(1, pw // 8), max(1, ph // 8)
 
-        # 2. Concurrently submit Instructor Mask to Worker Core
-        fut_inst = (
-            self._pool.submit(self._compute_instructor_mask, r, b, gray, w4, h4, pw, ph)
+        # 2. Compute Instructor Mask (Fast SIMD hardware-accelerated, zero GIL thread contention)
+        inst_mask = (
+            self._compute_instructor_mask(r, b, gray, w4, h4, pw, ph)
             if params.preserve_instructor
             else None
         )
@@ -442,26 +445,29 @@ class WhiteboardEnhancer:
 
         # 8. Board Color Reconstruction
         if params.invert_dark_mode:
-            bg_layer = Image.new("RGB", (pw, ph), (18, 22, 31))
+            if self._cached_dark_bg is None or self._cached_dark_bg.size != (pw, ph):
+                self._cached_dark_bg = Image.new("RGB", (pw, ph), (18, 22, 31))
+            bg_layer = self._cached_dark_bg
             if params.preset == "color_markers":
                 ink_layer = work_img.point([min(255, int(i * 1.3 + 40)) for i in range(256)] * 3)
             else:
                 ink_layer = Image.new("RGB", (pw, ph), (242, 248, 255))
             board_clean = Image.composite(ink_layer, bg_layer, ink_sharp)
         else:
-            bg_layer = Image.new("RGB", (pw, ph), (255, 255, 255))
+            if self._cached_white_bg is None or self._cached_white_bg.size != (pw, ph):
+                self._cached_white_bg = Image.new("RGB", (pw, ph), (255, 255, 255))
+            bg_layer = self._cached_white_bg
             if params.preset == "color_markers":
                 # High-contrast non-linear color curve: boosts colored marker depth and saturation
                 marker_lut = [min(255, int(pow(i / 255.0, 1.35) * 125)) for i in range(256)] * 3
                 ink_layer = work_img.point(marker_lut)
             else:
-                ink_scale = 0.14
-                ink_layer = work_img.point([int(i * ink_scale) for i in range(256)] * 3)
+                ink_layer = work_img.point(self._ink_scale_lut)
             board_clean = Image.composite(ink_layer, bg_layer, ink_sharp)
 
-        # 9. Instructor Composite (retrieve result from worker core)
-        if fut_inst:
-            out = Image.composite(work_img, board_clean, fut_inst.result())
+        # 9. Instructor Composite
+        if inst_mask is not None:
+            out = Image.composite(work_img, board_clean, inst_mask)
         else:
             out = board_clean
 
