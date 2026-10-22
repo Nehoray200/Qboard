@@ -24,7 +24,7 @@ from capture import (
     list_capturable_windows,
     find_zoom_window,
 )
-from ui.theme import set_window_capture_passthrough, set_window_click_through
+from ui.theme import set_window_capture_passthrough, set_window_click_through, copy_image_to_clipboard
 from app import ZoomPlusApp
 
 
@@ -195,10 +195,38 @@ def run_self_test() -> int:
         app.process_single_frame()
     print("      ✓ 5 frame ticks executed smoothly")
 
-    # Test snapshot generation
+    # Test snapshot generation and composite snapshot
     saved_path = app.save_snapshot(out_dir=test_dir)
     assert os.path.isfile(saved_path), f"Snapshot file not created at {saved_path}"
-    print(f"      ✓ Snapshot saved successfully: {os.path.basename(saved_path)}")
+    assert os.path.getsize(saved_path) > 1000, f"Snapshot too small: {saved_path}"
+    print(f"      ✓ Composite snapshot saved successfully: {os.path.basename(saved_path)}")
+
+    # Test clipboard copy utility
+    test_clip_res = copy_image_to_clipboard(frame0)
+    assert isinstance(test_clip_res, bool)
+    print(f"      ✓ copy_image_to_clipboard execution verified (res={test_clip_res})")
+
+    # Test Snipping Tool Mode & Anti-Mirror safeguards
+    app.enter_snipping_tool_mode()
+    assert app.capture_manager.anti_mirror_frozen is True
+    assert app.is_paused is True
+    app.exit_snipping_tool_mode()
+    assert app.capture_manager.anti_mirror_frozen is False
+    assert app.is_paused is False
+    app.toggle_snipping_tool_mode()
+    assert app.capture_manager.anti_mirror_frozen is True
+    app.toggle_snipping_tool_mode()
+    assert app.capture_manager.anti_mirror_frozen is False
+    print("      ✓ Snipping tool mode & anti-mirror freeze verified")
+
+    # Test exclude_capture toggle anti-mirror behavior
+    app.var_exclude_capture.set(False)
+    app._on_toggle_change("exclude_capture")
+    assert app.capture_manager.anti_mirror_frozen is True
+    app.var_exclude_capture.set(True)
+    app._on_toggle_change("exclude_capture")
+    assert app.capture_manager.anti_mirror_frozen is False
+    print("      ✓ exclude_capture anti-mirror safeguard verified")
 
     # Test window snapping, direct capture & browser trim
     import tkinter as tk

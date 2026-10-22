@@ -100,23 +100,35 @@ def set_window_capture_passthrough(
     from screen capture APIs (ImageGrab.grab, BitBlt, Windows Graphics Capture).
     The window remains 100% interactive and visible to the human user, allowing Zoom+
     to sit directly on top of the Zoom meeting window with zero hall-of-mirrors feedback.
+    Applies affinity to both the top-level parent HWND and the inner widget HWND.
     """
     try:
         window.update_idletasks()
-        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
-        if not hwnd:
-            hwnd = window.winfo_id()
-        if not hwnd:
+        inner_hwnd = window.winfo_id()
+        if not inner_hwnd:
             return False
+        GA_ROOT = 2
+        root_hwnd = ctypes.windll.user32.GetAncestor(wintypes.HWND(inner_hwnd), GA_ROOT) or inner_hwnd
+        parent_hwnd = ctypes.windll.user32.GetParent(wintypes.HWND(inner_hwnd)) or None
+
         affinity = wintypes.DWORD(WDA_EXCLUDEFROMCAPTURE if exclude_from_capture else WDA_NONE)
-        res = ctypes.windll.user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), affinity)
-        return bool(res)
+        success = False
+        for h in (root_hwnd, parent_hwnd, inner_hwnd):
+            if h:
+                res = ctypes.windll.user32.SetWindowDisplayAffinity(wintypes.HWND(h), affinity)
+                if res != 0:
+                    success = True
+        return success
     except Exception:
         return False
 
 
 def set_window_click_through(window: tk.Tk | tk.Toplevel, enable: bool = True) -> bool:
-    """Enable or disable mouse/input click-through (WS_EX_TRANSPARENT | WS_EX_LAYERED)."""
+    """
+    Enable or disable mouse/input click-through (WS_EX_TRANSPARENT | WS_EX_LAYERED).
+    Safely preserves and re-enforces WDA_EXCLUDEFROMCAPTURE affinity so Windows DWM
+    does not reset the anti-mirror exclusion during style updates.
+    """
     try:
         hwnd = ctypes.windll.user32.GetParent(window.winfo_id()) or window.winfo_id()
         if not hwnd:
@@ -129,6 +141,69 @@ def set_window_click_through(window: tk.Tk | tk.Toplevel, enable: bool = True) -
         set_long(wintypes.HWND(hwnd), GWL_EXSTYLE, new_style)
         SWP_FLAGS = 0x0002 | 0x0001 | 0x0004 | 0x0020  # NOMOVE | NOSIZE | NOZORDER | FRAMECHANGED
         ctypes.windll.user32.SetWindowPos(wintypes.HWND(hwnd), None, 0, 0, 0, 0, SWP_FLAGS)
+
+        # Re-enforce capture passthrough affinity after modifying extended styles
+        set_window_capture_passthrough(window, True)
+        return True
+    except Exception:
+        return False
+
+
+def copy_image_to_clipboard(image: Any, owner_hwnd: Optional[int] = None) -> bool:
+    """
+    Copy a PIL Image to the Windows system clipboard in CF_DIB format.
+    Allows instant Ctrl+V pasting into Discord, Zoom, WhatsApp, or AI chat interfaces.
+    """
+    import io
+    import time
+    try:
+        output = io.BytesIO()
+        rgb_img = image.convert("RGB")
+        rgb_img.save(output, format="BMP")
+        bmp_data = output.getvalue()
+        output.close()
+        # CF_DIB payload is BMP without the 14-byte BITMAPFILEHEADER
+        dib_data = bmp_data[14:]
+
+        GMEM_MOVEABLE = 0x0002
+        CF_DIB = 8
+
+        h_mem = ctypes.windll.kernel32.GlobalAlloc(GMEM_MOVEABLE, len(dib_data))
+        if not h_mem:
+            return False
+        p_mem = ctypes.windll.kernel32.GlobalLock(h_mem)
+        if not p_mem:
+            ctypes.windll.kernel32.GlobalFree(h_mem)
+            return False
+        ctypes.memmove(p_mem, dib_data, len(dib_data))
+        ctypes.windll.kernel32.GlobalUnlock(h_mem)
+
+        hwnd_val = wintypes.HWND(owner_hwnd) if owner_hwnd else None
+        opened = False
+        for _ in range(5):
+            if ctypes.windll.user32.OpenClipboard(hwnd_val):
+                opened = True
+                break
+            time.sleep(0.015)
+
+        if opened:
+            try:
+                ctypes.windll.user32.EmptyClipboard()
+                res = ctypes.windll.user32.SetClipboardData(CF_DIB, h_mem)
+                return bool(res)
+            finally:
+                ctypes.windll.user32.CloseClipboard()
+    except Exception:
+        pass
+    return False
+
+
+def open_folder_in_explorer(folder_path: str) -> bool:
+    """Open folder in Windows File Explorer and bring to front."""
+    import os
+    try:
+        os.makedirs(folder_path, exist_ok=True)
+        os.startfile(folder_path)
         return True
     except Exception:
         return False

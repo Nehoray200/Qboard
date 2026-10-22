@@ -16,7 +16,7 @@ import tkinter as tk
 # Virtual Key Codes (Windows API)
 VK_SHIFT, VK_CONTROL, VK_MENU = 0x10, 0x11, 0x12  # Shift, Ctrl, Alt
 VK_A, VK_B, VK_M, VK_O, VK_Q, VK_S, VK_T, VK_Z = 0x41, 0x42, 0x4D, 0x4F, 0x51, 0x53, 0x54, 0x5A
-VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10 = 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79
+VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11 = 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A
 
 
 class GlobalHotkeyManager:
@@ -43,6 +43,7 @@ class GlobalHotkeyManager:
             "clickthrough": False,
             "board_points": False,
             "auto_board": False,
+            "snipping": False,
         }
 
     def start(self) -> None:
@@ -93,6 +94,7 @@ class GlobalHotkeyManager:
             f8_down = self._is_down(VK_F8)
             f9_down = self._is_down(VK_F9)
             f10_down = self._is_down(VK_F10)
+            f11_down = self._is_down(VK_F11)
 
             a_down = self._is_down(VK_A)
             b_down = self._is_down(VK_B)
@@ -157,6 +159,12 @@ class GlobalHotkeyManager:
                 self._dispatch_auto_board()
             self._key_states["auto_board"] = state_auto_board
 
+            # 9. Snipping Tool Mode: F11
+            state_snipping = f11_down and not ctrl_down and not alt_down
+            if state_snipping and not self._key_states["snipping"]:
+                self._dispatch_snipping()
+            self._key_states["snipping"] = state_snipping
+
         except Exception:
             pass
 
@@ -191,6 +199,10 @@ class GlobalHotkeyManager:
         if hasattr(self.app, "auto_detect_board_region"):
             self.app.auto_detect_board_region()
 
+    def _dispatch_snipping(self) -> None:
+        if hasattr(self.app, "toggle_snipping_tool_mode"):
+            self.app.toggle_snipping_tool_mode()
+
     def _dispatch_quit(self) -> None:
         if hasattr(self.app, "quit_app"):
             self.app.quit_app()
@@ -222,6 +234,9 @@ def bind_local_shortcuts(app: Any) -> None:
 
     # Streaming pause/resume
     root.bind("<space>", lambda e: app.toggle_pause() if hasattr(app, "toggle_pause") else None)
+
+    # Snipping tool mode
+    root.bind("<F11>", lambda e: app.toggle_snipping_tool_mode() if hasattr(app, "toggle_snipping_tool_mode") else None)
 
     # In-app snapshot shortcut
     for k in ("<Control-s>", "<Control-S>"):

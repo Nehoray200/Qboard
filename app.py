@@ -1,6 +1,15 @@
 """Qboard Seamless Whiteboard Overlay Application (app.py)"""
 from __future__ import annotations
 import os, sys, time, json, logging, ctypes; from ctypes import wintypes
+
+try:
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:
+    try: ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try: ctypes.windll.user32.SetProcessDPIAware()
+        except Exception: pass
+
 from datetime import datetime; from typing import Optional, Tuple, Dict, Any, List
 import tkinter as tk; from tkinter import messagebox, filedialog
 from PIL import Image, ImageTk, ImageDraw, ImageGrab
@@ -8,10 +17,10 @@ from processor import WhiteboardEnhancer, EnhancementParams, PRESETS, PRESET_INF
 from capture import (LiveCaptureManager, find_zoom_window, init_dpi_awareness, enum_display_monitors,
                     MonitorInfo, bring_window_to_front, get_window_rect)
 from ui.theme import (CLR_BG_ROOT, CLR_BG_TOOLBAR, CLR_BORDER, CLR_ACCENT, CLR_TEXT_MUTED,
-                     FONT_FAMILY, FONT_BODY_BOLD, FONT_BADGE, set_window_capture_passthrough, set_window_click_through)
+                     FONT_FAMILY, FONT_BODY_BOLD, FONT_BADGE, set_window_capture_passthrough, set_window_click_through,
+                     copy_image_to_clipboard, open_folder_in_explorer)
 from ui.modals import WindowPickerModal, ScreenRegionSelector, ScreenPickerModal, BoardPointSelector
 from ui.hotkeys import GlobalHotkeyManager, bind_local_shortcuts
-from pipeline import FramePipeline
 
 def _get_app_dir() -> str:
     for c in (os.path.join(os.environ.get("APPDATA") or "", "Qboard"), os.path.join(os.path.expanduser("~"), ".qboard"),
@@ -52,15 +61,15 @@ class ZoomPlusApp:
         self.hotkey_mgr = GlobalHotkeyManager(self, poll_interval_ms=40)
         self.apply_preset("clean_board", update_sliders=True)
         if not self.headless: self.load_settings()
-        self.pipeline = FramePipeline(self.capture_manager.capture_frame, lambda f: self.enhancer.enhance(f, self.current_params))
         if self.headless: self.root.withdraw()
-        else: self.pipeline.start(); self.root.after(40, self._video_tick); self.hotkey_mgr.start()
+        else: self.root.after(50, self._video_tick); self.hotkey_mgr.start()
 
     def _init_variables(self) -> None:
         p = self.current_params
         specs = [("contrast", p.contrast, "{:.2f}"), ("thickening", p.thickening, "{:.2f}"),
-                 ("glare_removal", p.glare_removal, "{:.2f}"), ("white_threshold", p.white_threshold, "{:.3f}"),
-                 ("ink_saturation", p.ink_saturation, "{:.3f}"), ("gamma", p.gamma, "{:.2f}"), ("sharpen", p.sharpen, "{:.1f}")]
+                 ("glare_removal", p.glare_removal, "{:.2f}"), ("shadow_suppression", getattr(p, "shadow_suppression", 0.85), "{:.2f}"),
+                 ("white_threshold", p.white_threshold, "{:.3f}"), ("ink_saturation", p.ink_saturation, "{:.3f}"),
+                 ("gamma", p.gamma, "{:.2f}"), ("sharpen", p.sharpen, "{:.1f}")]
         self._slider_map = {k: (tk.DoubleVar(value=v), tk.StringVar(value=f.format(v)), f) for k, v, f in specs}
         for k, (var, lbl, _) in self._slider_map.items(): setattr(self, f"var_{k}", var); setattr(self, f"lbl_{k}_val", lbl)
         self.var_fast_mode, self.var_preserve_instructor, self.var_invert_dark_mode = tk.BooleanVar(value=p.fast_mode), tk.BooleanVar(value=p.preserve_instructor), tk.BooleanVar(value=p.invert_dark_mode)
@@ -199,7 +208,7 @@ class ZoomPlusApp:
 
     def process_single_frame(self) -> None:
         self._frame_seq += 1
-        raw_frame = self.current_frame_orig if (not self.var_exclude_capture.get() and self.current_frame_orig is not None and self.capture_manager.mode in ("screen", "region", "fullscreen")) else self.capture_manager.capture_frame()
+        raw_frame = self.capture_manager.capture_frame()
         self.current_frame_orig = raw_frame
         if self.view_mode == "original": self.current_frame_enhanced, self.current_processed_frame = None, raw_frame
         else:
@@ -221,11 +230,14 @@ class ZoomPlusApp:
         if cw < 30 or ch < 30 or iw < 10 or ih < 10: return
         if getattr(self.enhancer, "last_frame_was_cached", False) and self._rendered_frame_seq == self._frame_seq and (cw, ch) == getattr(self, "_last_canvas_size", None) and self.view_mode == "enhanced":
             self._toast_message and self._render_toast(); return
-        scale = max(0.01, min(cw / float(iw), ch / float(ih)))
-        dw, dh = int(round(iw * scale)), int(round(ih * scale))
-        ox, oy = (cw - dw) // 2, (ch - dh) // 2
+        if abs(cw - iw) <= 2 and abs(ch - ih) <= 2:
+            dw, dh, ox, oy, scale = iw, ih, 0, 0, 1.0
+        else:
+            scale = max(0.01, min(cw / float(iw), ch / float(ih)))
+            dw, dh = int(round(iw * scale)), int(round(ih * scale))
+            ox, oy = (cw - dw) // 2, (ch - dh) // 2
         self.canvas_layout = (ox, oy, dw, dh, scale)
-        img_to_show = self.current_processed_frame if (dw, dh) == (iw, ih) else self.current_processed_frame.resize((dw, dh), Image.Resampling.BILINEAR)
+        img_to_show = self.current_processed_frame if (dw, dh) == (iw, ih) else self.current_processed_frame.resize((dw, dh), Image.Resampling.LANCZOS)
         self.current_tk_photo = ImageTk.PhotoImage(img_to_show)
         self._rendered_frame_seq, self._last_canvas_size = self._frame_seq, (cw, ch)
         self.canvas.delete("video_frame"); self.canvas.delete("split_hud")
@@ -246,17 +258,9 @@ class ZoomPlusApp:
             if not self.headless and self.root.winfo_exists(): self.root.after(200, self._video_tick)
             return
         if not self.is_paused:
-            item = self.pipeline.get_latest_frame()
-            if item is not None:
-                self.current_frame_orig, self.current_frame_enhanced = item
-                self.current_processed_frame = self.enhancer.create_comparison_view(self.current_frame_orig, self.current_frame_enhanced, self.split_ratio) if self.view_mode == "split" else (self.current_frame_orig if self.view_mode == "original" else self.current_frame_enhanced)
-                if not self.headless: self._render_current_frame_to_canvas()
-                self.stat_fps.set(f"⚡ {self.pipeline.process_fps:.1f} FPS")
-                self.stat_latency.set(f"⏱️ לכידה: {self.pipeline.last_capture_ms:.1f}ms | עיבוד: {self.pipeline.last_process_ms:.1f}ms")
-            elif self.headless:
-                try: self.process_single_frame()
-                except Exception as e: logger.error(f"Frame error: {e}")
-        if not self.headless and self.root.winfo_exists(): self.root.after(12, self._video_tick)
+            try: self.process_single_frame()
+            except Exception as e: logger.error(f"Frame error: {e}")
+        if not self.headless and self.root.winfo_exists(): self.root.after(15, self._video_tick)
 
     def apply_preset(self, preset_name: str, update_sliders: bool = True) -> None:
         if preset_name not in PRESETS: return
@@ -278,7 +282,16 @@ class ZoomPlusApp:
         except Exception: pass
 
     def _on_toggle_change(self, key: str) -> None:
-        if key == "exclude_capture": val = self.var_exclude_capture.get(); set_window_capture_passthrough(self.root, val); self.show_toast("👻 שקיפות ללכידה פעילה" if val else "⚠️ שקיפות ללכידה כבויה")
+        if key == "exclude_capture":
+            val = self.var_exclude_capture.get()
+            if not val:
+                self.capture_manager.anti_mirror_frozen = True
+                set_window_capture_passthrough(self.root, False)
+                self.show_toast("✂️ מניעת צילום כבויה (הפריים הוקפא למניעת שכפול מסך)")
+            else:
+                self.capture_manager.anti_mirror_frozen = False
+                set_window_capture_passthrough(self.root, True)
+                self.show_toast("👻 מניעת צילום עצמי פעילה")
         elif key == "click_through": self.set_click_through_mode(self.var_click_through.get())
         elif key == "always_on_top": val = self.var_always_on_top.get(); self.root.attributes("-topmost", val); self.show_toast("📌 נעוץ מעל כל החלונות" if val else "🔓 ביטול נעיצה")
         elif key == "trim_browser_header": val = self.var_trim_browser_header.get(); self.capture_manager.trim_browser_header = val; self.show_toast("✂️ הסתרת כרטיסיות דפדפן פעילה" if val else "כרטיסיות דפדפן גלויות")
@@ -398,15 +411,108 @@ class ZoomPlusApp:
 
     def set_board_crop(self, crop_norm: Optional[Tuple[float, float, float, float]]) -> None: self.capture_manager.set_board_crop(crop_norm)
     def reset_board_crop(self) -> None: self.set_board_crop(None); self.show_toast("🔄 חיתוך הלוח בוטל - מוצג פריים מלא")
-    def toggle_pause(self) -> None: self.is_paused = not self.is_paused; self.show_toast("⏸️ השידור הושהה" if self.is_paused else "▶️ שידור חי נמשך")
+    def toggle_pause(self) -> None:
+        if getattr(self.capture_manager, "anti_mirror_frozen", False):
+            self.exit_snipping_tool_mode()
+            return
+        self.is_paused = not self.is_paused
+        self.show_toast("⏸️ השידור הושהה" if self.is_paused else "▶️ שידור חי נמשך")
+
+    def save_composite_snapshot(self, out_dir: Optional[str] = None) -> str:
+        """
+        Capture and compose a realistic screenshot matching exactly what the user sees:
+        - The underlying desktop screen/Zoom meeting background is captured cleanly in full.
+        - The enhanced whiteboard is composited directly into the whiteboard position.
+        - The rest of the screen, classroom, lecturer and background remains 100% natural and un-filtered.
+        - Automatically saves high-res PNG to captures/ and copies image to Windows Clipboard (Ctrl+V).
+        """
+        captures_dir = out_dir if out_dir else os.path.join(os.getcwd(), "captures")
+        os.makedirs(captures_dir, exist_ok=True)
+        filepath = os.path.join(captures_dir, f"zoom_screen_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+
+        # 1. Full un-cropped background of the screen/window
+        bg_full = self.capture_manager.capture_full_background()
+
+        # 2. Get the whiteboard frame
+        raw_board = self.current_frame_orig if self.current_frame_orig is not None else self.capture_manager.capture_frame()
+
+        # 3. Enhance whiteboard
+        if self.view_mode == "original":
+            enhanced_board = raw_board
+        else:
+            enhanced_board = self.enhancer.enhance(
+                raw_board, self.current_params.copy(fast_mode=False), max_process_width=2560
+            )
+            if self.view_mode == "split":
+                enhanced_board = self.enhancer.create_comparison_view(raw_board, enhanced_board, self.split_ratio)
+
+        # 4. Composite the enhanced board onto the full background
+        composite_image = bg_full.copy()
+        bw, bh = bg_full.size
+
+        if self.capture_manager.board_crop_norm:
+            x1, y1, x2, y2 = self.capture_manager.board_crop_norm
+            px1, py1 = int(round(x1 * bw)), int(round(y1 * bh))
+            px2, py2 = int(round(x2 * bw)), int(round(y2 * bh))
+            target_w, target_h = max(10, px2 - px1), max(10, py2 - py1)
+            board_resized = enhanced_board.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            composite_image.paste(board_resized, (px1, py1))
+        elif self.active_source_type in ("region", "window") and not self.headless and self.root.winfo_exists():
+            try:
+                wx = self.root.winfo_rootx()
+                wy = self.root.winfo_rooty()
+                ww = self.root.winfo_width()
+                wh = self.root.winfo_height()
+                if ww > 20 and wh > 20 and (ww < bw or wh < bh):
+                    board_resized = enhanced_board.resize((ww, wh), Image.Resampling.LANCZOS)
+                    px = max(0, min(bw - ww, wx))
+                    py = max(0, min(bh - wh, wy))
+                    composite_image.paste(board_resized, (px, py))
+                else:
+                    composite_image = enhanced_board
+            except Exception:
+                composite_image = enhanced_board
+        else:
+            composite_image = enhanced_board
+
+        composite_image.save(filepath, "PNG")
+        owner_hwnd = self.root.winfo_id() if not self.headless and self.root.winfo_exists() else None
+        clip_ok = copy_image_to_clipboard(composite_image, owner_hwnd)
+        msg = f"📸 צילום משולב נשמר והועתק ללוח! הדבק בצ'אט (Ctrl+V)" if clip_ok else f"📸 צילום משולב נשמר: {os.path.basename(filepath)}"
+        self.show_toast(msg)
+        return os.path.abspath(filepath)
 
     def save_snapshot(self, out_dir: Optional[str] = None) -> str:
-        captures_dir = out_dir if out_dir else os.path.join(os.getcwd(), "captures"); os.makedirs(captures_dir, exist_ok=True)
-        filepath = os.path.join(captures_dir, f"zoom_board_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-        raw = self.capture_manager.capture_frame()
-        target = raw if self.view_mode == "original" else self.enhancer.enhance(raw, self.current_params.copy(fast_mode=False), max_process_width=2560)
-        if self.view_mode == "split" and self.view_mode != "original": target = self.enhancer.create_comparison_view(raw, target, self.split_ratio)
-        target.save(filepath, "PNG"); self.show_toast(f"📸 נשמר: {os.path.basename(filepath)}"); return os.path.abspath(filepath)
+        return self.save_composite_snapshot(out_dir)
+
+    def open_captures_folder(self) -> None:
+        captures_dir = os.path.join(os.getcwd(), "captures")
+        os.makedirs(captures_dir, exist_ok=True)
+        open_folder_in_explorer(captures_dir)
+        self.show_toast("📁 נפתחה תיקיית הצילומים captures/")
+
+    def enter_snipping_tool_mode(self) -> None:
+        """
+        Safely pause live video and unhide Qboard from Windows Snipping Tool (Win+Shift+S).
+        By freezing the capture pipeline, zero screen duplication / infinity-mirror can occur.
+        """
+        self.capture_manager.anti_mirror_frozen = True
+        self.is_paused = True
+        set_window_capture_passthrough(self.root, False)
+        self.show_toast("✂️ מסך הוקפא וגלוי ל-Win+Shift+S! לחץ רווח או F11 לחזרה לשידור חי")
+
+    def exit_snipping_tool_mode(self) -> None:
+        """Restore capture passthrough affinity and resume live video."""
+        set_window_capture_passthrough(self.root, True)
+        self.capture_manager.anti_mirror_frozen = False
+        self.is_paused = False
+        self.show_toast("▶️ הגנת מניעת צילום שוחזרה - שידור חי נמשך")
+
+    def toggle_snipping_tool_mode(self) -> None:
+        if getattr(self.capture_manager, "anti_mirror_frozen", False):
+            self.exit_snipping_tool_mode()
+        else:
+            self.enter_snipping_tool_mode()
 
     def toggle_capture_passthrough(self) -> None: self.var_exclude_capture.set(not self.var_exclude_capture.get()); self._on_toggle_change("exclude_capture")
     def toggle_always_on_top(self) -> None: st = not self.var_always_on_top.get(); self.var_always_on_top.set(st); self.root.attributes("-topmost", st); self.show_toast("📌 נעוץ מעל כל החלונות" if st else "🔓 ביטול נעיצה")
@@ -468,7 +574,7 @@ class ZoomPlusApp:
             with open(_SETTINGS_FILE, "w", encoding="utf-8") as f: json.dump(d, f, indent=2)
         except Exception as e: logger.warning(f"Settings save: {e}")
     def quit_app(self) -> None:
-        try: hasattr(self, "pipeline") and self.pipeline.stop(); self.save_settings(); self.hotkey_mgr.stop(); self.settings_window and self.settings_window.winfo_exists() and self.settings_window.destroy(); self.root.destroy()
+        try: self.save_settings(); self.hotkey_mgr.stop(); self.settings_window and self.settings_window.winfo_exists() and self.settings_window.destroy(); self.root.destroy()
         except Exception: pass
     def _on_escape(self) -> None:
         if self.crop_mode: self.toggle_crop_mode(); return

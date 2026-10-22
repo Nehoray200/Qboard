@@ -348,6 +348,7 @@ class LiveCaptureManager:
         self.simulate_live = simulate_live
         self.selected_monitor_index = selected_monitor_index
         self.trim_browser_header = trim_browser_header
+        self.anti_mirror_frozen: bool = False
 
         if self.mode == "screen" and self.region_bbox is None:
             self.set_target_screen(self.selected_monitor_index)
@@ -568,12 +569,53 @@ class LiveCaptureManager:
             return frame.crop((px1, py1, px2, py2))
         return frame
 
+    def capture_full_background(self) -> Image.Image:
+        """
+        Capture the entire underlying desktop screen or target window background
+        without whiteboard sub-ROI cropping.
+        Under WDA_EXCLUDEFROMCAPTURE, this captures the clean desktop/Zoom video
+        underneath Qboard without UI occlusions.
+        """
+        if self.mode == "demo":
+            if self._demo_base_img is None:
+                self._load_demo_image()
+            return self._demo_base_img.copy() if self._demo_base_img else self._create_synthetic_whiteboard()
+
+        if self.mode == "window" and self.hwnd:
+            direct = capture_window_direct(self.hwnd)
+            if direct is not None and direct.width > 0 and direct.height > 0:
+                return direct
+            rect = get_window_rect(self.hwnd)
+            if rect:
+                try:
+                    grabbed = ImageGrab.grab(bbox=rect, all_screens=True)
+                    if grabbed.width > 0 and grabbed.height > 0:
+                        return grabbed
+                except Exception:
+                    pass
+
+        if self.region_bbox:
+            try:
+                grabbed = ImageGrab.grab(bbox=self.region_bbox, all_screens=True)
+                if grabbed.width > 0 and grabbed.height > 0:
+                    return grabbed
+            except Exception:
+                pass
+
+        try:
+            return ImageGrab.grab(all_screens=True)
+        except Exception:
+            return self.last_frame.copy() if self.last_frame is not None else self._get_placeholder_frame("Background capture failed")
+
     def capture_frame(self) -> Image.Image:
         """
         Capture and return a single frame according to the active mode and ROI crop.
         Updates FPS and capture latency metrics.
         Never raises fatal exceptions; gracefully falls back on errors.
         """
+        if self.anti_mirror_frozen and self.last_frame is not None:
+            return self.last_frame.copy()
+
         t0 = time.perf_counter()
 
         if self.mode == "demo":

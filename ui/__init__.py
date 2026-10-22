@@ -44,6 +44,8 @@ from ui.theme import (
     apply_dark_title_bar,
     set_window_capture_passthrough,
     set_window_click_through,
+    copy_image_to_clipboard,
+    open_folder_in_explorer,
     make_flat_button,
     configure_studio_styles,
 )
@@ -101,6 +103,8 @@ __all__ = [
     "apply_dark_title_bar",
     "set_window_capture_passthrough",
     "set_window_click_through",
+    "copy_image_to_clipboard",
+    "open_folder_in_explorer",
     "make_flat_button",
     "configure_studio_styles",
     # Modals exports

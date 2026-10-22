@@ -40,7 +40,7 @@ SLIDERS_META = [
 TOGGLES_META = [
     ("fast_mode", "⚡ מצב מהירות שיא (Turbo FPS)", False),
     ("click_through", "🖱️ שקיפות ללחיצות (מאפשר לדבר במקש רווח בזום)", True),
-    ("exclude_capture", "👻 מניעת צילום עצמי (שקוף ללכידה)", True),
+    ("exclude_capture", "👻 מניעת צילום עצמי (הגנה מפני שכפול מסך)", True),
     ("always_on_top", "📌 נעוץ מעל כל החלונות (Always on Top)", False),
     ("trim_browser_header", "✂️ הסתרת כרטיסיות דפדפן (טאבים עליונים)", False),
     ("preserve_instructor", "שימור דמות המרצה וצבעים טבעיים", True),
@@ -153,6 +153,7 @@ class SettingsWindow(tk.Toplevel):
         self._build_presets_section(self.content_frame)
         self._build_sliders_section(self.content_frame)
         self._build_toggles_section(self.content_frame)
+        self._build_screenshots_section(self.content_frame)
         self._build_reset_section(self.content_frame)
 
     def _build_source_section(self, parent: tk.Widget) -> None:
@@ -260,6 +261,31 @@ class SettingsWindow(tk.Toplevel):
                 bg=CLR_BG_PANEL, fg=CLR_TEXT_PRIMARY, selectcolor=CLR_BG_INPUT, activebackground=CLR_BG_PANEL, activeforeground=CLR_ACCENT,
                 font=FONT_BODY, anchor="e", justify=tk.RIGHT, pady=3
             ).pack(fill=tk.X)
+
+    def _build_screenshots_section(self, parent: tk.Widget) -> None:
+        card = tk.LabelFrame(parent, text="  📸 צילום מסך ושיתוף תוצאות  ", font=FONT_BODY_BOLD, bg=CLR_BG_PANEL, fg=CLR_ACCENT, bd=1, relief="solid", padx=10, pady=8)
+        card.pack(fill=tk.X, pady=(0, 10))
+
+        btn_composite = make_flat_button(
+            card, text="📸 צילום מסך מלא והעתקה ללוח (F8 / Ctrl+V)",
+            command=lambda: self.app.quick_snapshot() if self.app and hasattr(self.app, "quick_snapshot") else None,
+            bg=CLR_ACCENT_BG, fg="#FFFFFF", hover_bg=CLR_ACCENT_HOVER, font=FONT_BODY_BOLD, padx=8, pady=7
+        )
+        btn_composite.pack(fill=tk.X, pady=2)
+
+        btn_snip = make_flat_button(
+            card, text="✂️ מצב Snipping Tool (הקפאת מסך ל-Win+Shift+S / F11)",
+            command=lambda: self.app.toggle_snipping_tool_mode() if self.app and hasattr(self.app, "toggle_snipping_tool_mode") else None,
+            bg=CLR_BG_CARD, fg=CLR_ACCENT, hover_bg=CLR_BORDER, font=FONT_BODY_BOLD, padx=8, pady=5
+        )
+        btn_snip.pack(fill=tk.X, pady=2)
+
+        btn_folder = make_flat_button(
+            card, text="📁 פתיחת תיקיית הצילומים (captures)",
+            command=lambda: self.app.open_captures_folder() if self.app and hasattr(self.app, "open_captures_folder") else None,
+            bg=CLR_BG_CARD, fg=CLR_TEXT_PRIMARY, hover_bg=CLR_BORDER, font=FONT_BODY, padx=8, pady=5
+        )
+        btn_folder.pack(fill=tk.X, pady=2)
 
     def _build_reset_section(self, parent: tk.Widget) -> None:
         btn_reset = make_flat_button(

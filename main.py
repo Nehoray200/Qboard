@@ -9,6 +9,20 @@ Usage:
 """
 
 import sys
+import ctypes
+
+# Initialize Windows Per-Monitor DPI awareness BEFORE any GUI module (Tkinter) is loaded
+try:
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
 from app import ZoomPlusApp
 from tests_runner import run_self_test
 
