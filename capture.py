@@ -594,13 +594,7 @@ class LiveCaptureManager:
                 except Exception:
                     pass
 
-        if self.region_bbox:
-            try:
-                grabbed = ImageGrab.grab(bbox=self.region_bbox, all_screens=True)
-                if grabbed.width > 0 and grabbed.height > 0:
-                    return grabbed
-            except Exception:
-                pass
+
 
         try:
             return ImageGrab.grab(all_screens=True)

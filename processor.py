@@ -71,9 +71,9 @@ class WhiteboardEnhancer:
 
         self._ink_lut_cache: Dict[Tuple[int, int, float, float], List[int]] = {}
         self._x9_lut: List[int] = [min(255, i * 9) for i in range(256)]
-        self._has_ink_lut: List[int] = [0 if d <= 2 else (160 if d == 3 else 255) for d in range(256)]
-        self._cohesion_lut: List[int] = [0 if s <= 7 else min(10, (s - 6) // 3) for s in range(256)]
-        self._co_gate_exact_lut: List[int] = [0 if s <= 5 else (160 if s == 6 else 255) for s in range(256)]
+        self._has_ink_lut: List[int] = [0 if d <= 3 else (140 if d == 4 else 255) for d in range(256)]
+        self._cohesion_lut: List[int] = [0 if s <= 8 else min(10, (s - 7) // 3) for s in range(256)]
+        self._co_gate_exact_lut: List[int] = [0 if s <= 6 else (140 if s == 7 else 255) for s in range(256)]
         self._glare_zone_lut: List[int] = [min(255, max(0, (i - 172) * 6)) for i in range(256)]
         self._glare_diff_lut: List[int] = [0 if s <= 6 else min(255, (s - 6) // 2) for s in range(256)]
         self._skin_lut: List[int] = [min(255, max(0, (i - 12) * 16)) for i in range(256)]
@@ -93,7 +93,7 @@ class WhiteboardEnhancer:
         self._env_tick: int = 0
 
     def _get_ink_lut(self, white_threshold: float, ink_saturation: float, gamma: float, contrast: float) -> List[int]:
-        thresh_u8 = max(1, min(6, int(round(white_threshold * 165.0))))
+        thresh_u8 = max(2, min(7, int(round(white_threshold * 180.0))))
         sat_u8 = max(thresh_u8 + 8, int(round(ink_saturation * 250.0)))
         gamma_exp = round(1.0 / max(gamma, 0.25), 4)
         contrast_scale = round(max(contrast, 0.2) / 1.65, 4)
@@ -177,12 +177,17 @@ class WhiteboardEnhancer:
         x2 = int(bright_cols[-1]) if len(bright_cols) > 0 else int(0.97 * dw)
         if col_edge[rp] > np.percentile(col_edge, 80) and rp < x2: x2 = rp
 
+        # Guard inset: clear boundary aluminum rails and jagged frame edges
+        y1 = min(int(0.48 * dh), y1 + 2)
+        y2 = max(y1 + 10, y2 - 1)
+        x1 = min(int(0.20 * dw), x1 + 1)
+        x2 = max(x1 + 20, x2 - 1)
         x1_n, y1_n, x2_n, y2_n = float(x1) / dw, float(y1) / dh, float(x2) / dw, float(y2) / dh
         if len(bright_cols) == 0 or (x2_n - x1_n < 0.25) or (y2_n - y1_n < 0.20) or (x1_n >= x2_n) or (y1_n >= y2_n):
             return (0.03, 0.18, 0.97, 0.82)
         return (round(max(0.0, min(1.0, x1_n)), 4), round(max(0.0, min(1.0, y1_n)), 4), round(max(0.0, min(1.0, x2_n)), 4), round(max(0.0, min(1.0, y2_n)), 4))
 
-    def enhance(self, img: Image.Image, params: Optional[EnhancementParams] = None, max_process_width: int = 1280) -> Image.Image:
+    def enhance(self, img: Image.Image, params: Optional[EnhancementParams] = None, max_process_width: Optional[int] = None) -> Image.Image:
         t_start = time.perf_counter()
         if params is None: params = PRESETS["clean_board"]
         w, h = img.size
@@ -207,7 +212,8 @@ class WhiteboardEnhancer:
             self._cache_age, self.last_frame_was_cached = 0, False
 
         if params.denoise: src_img = src_img.filter(ImageFilter.BoxBlur(0.7))
-        if params.fast_mode and w > 1440 and w > max_process_width:
+        # Always maintain 100% native resolution to prevent blurriness and quality loss
+        if max_process_width is not None and w > max_process_width and max_process_width >= 1920:
             pw = max_process_width; ph = max(1, int(round(h * (pw / w))))
             work_img = src_img.resize((pw, ph), Image.Resampling.BILINEAR)
         else:

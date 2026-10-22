@@ -307,6 +307,7 @@ class ZoomPlusApp:
         if mode in ("enhanced", "split", "original"): self.view_mode = mode; self.current_frame_orig and self.process_single_frame()
 
     def select_monitor(self, monitor_index: int = 0) -> None:
+        self.capture_manager.set_region(None); self.capture_manager.set_board_crop(None)
         mon = self.capture_manager.set_target_screen(monitor_index); self.snap_to_monitor(monitor_index)
         self.active_source_type, self.active_monitor_index, self.view_mode = "screen", mon.index, "enhanced"
         self.stat_source.set(f"מקור: מסך {mon.index + 1} ({mon.width}×{mon.height})"); self.show_toast(f"🖥️ הופעל על מסך {mon.index + 1} ({mon.width}×{mon.height}{' - ראשי' if mon.is_primary else ''})")
@@ -457,6 +458,13 @@ class ZoomPlusApp:
             target_w, target_h = max(10, px2 - px1), max(10, py2 - py1)
             board_resized = enhanced_board.resize((target_w, target_h), Image.Resampling.LANCZOS)
             composite_image.paste(board_resized, (px1, py1))
+        elif self.capture_manager.region_bbox:
+            rx1, ry1, rx2, ry2 = self.capture_manager.region_bbox
+            target_w, target_h = max(10, rx2 - rx1), max(10, ry2 - ry1)
+            board_resized = enhanced_board.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            px = max(0, min(bw - target_w, rx1))
+            py = max(0, min(bh - target_h, ry1))
+            composite_image.paste(board_resized, (px, py))
         elif self.active_source_type in ("region", "window") and not self.headless and self.root.winfo_exists():
             try:
                 wx = self.root.winfo_rootx()
@@ -469,11 +477,11 @@ class ZoomPlusApp:
                     py = max(0, min(bh - wh, wy))
                     composite_image.paste(board_resized, (px, py))
                 else:
-                    composite_image = enhanced_board
+                    composite_image = enhanced_board.resize((bw, bh), Image.Resampling.LANCZOS)
             except Exception:
-                composite_image = enhanced_board
+                composite_image = enhanced_board.resize((bw, bh), Image.Resampling.LANCZOS)
         else:
-            composite_image = enhanced_board
+            composite_image = enhanced_board.resize((bw, bh), Image.Resampling.LANCZOS)
 
         composite_image.save(filepath, "PNG")
         owner_hwnd = self.root.winfo_id() if not self.headless and self.root.winfo_exists() else None
@@ -561,7 +569,18 @@ class ZoomPlusApp:
             for k, v in d.get("toggles", {}).items():
                 if k != "exclude_capture" and hasattr(self, f"var_{k}"): getattr(self, f"var_{k}").set(v); self._on_toggle_change(k)
             if d.get("last_locked_geometry"): self._last_locked_geometry = d["last_locked_geometry"]
-            if d.get("last_source_type") and d["last_source_type"] not in ("demo",): self.active_source_type = d["last_source_type"]
+            if d.get("last_source_type") and d["last_source_type"] not in ("demo",):
+                self.active_source_type = d["last_source_type"]
+                if self.active_source_type == "region" and self._last_locked_geometry:
+                    try:
+                        parts = self._last_locked_geometry.replace("+", " ").replace("x", " ").split()
+                        if len(parts) == 4:
+                            gw, gh, gx, gy = map(int, parts)
+                            if gw > 50 and gh > 50:
+                                self.capture_manager.set_region((gx, gy, gx + gw, gy + gh))
+                                self.root.geometry(self._last_locked_geometry)
+                    except Exception:
+                        self.active_source_type = "screen" 
         except Exception as e: logger.warning(f"Settings load: {e}")
     def save_settings(self) -> None:
         if self.headless: return
