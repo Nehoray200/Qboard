@@ -10,7 +10,7 @@ Modular desktop user interface for Zoom+ Pro Studio:
 
 from __future__ import annotations
 
-from ui import theme, modals, hotkeys, settings_window
+from ui import theme, modals, hotkeys, settings_window, canvas_renderer
 
 from ui.theme import (
     CLR_BG_ROOT,
@@ -65,6 +65,9 @@ from ui.hotkeys import (
 from ui.settings_window import (
     SettingsWindow,
 )
+from ui.canvas_renderer import (
+    CanvasRenderer,
+)
 
 __all__ = [
     "theme",
@@ -117,4 +120,6 @@ __all__ = [
     "bind_local_shortcuts",
     # Settings window exports
     "SettingsWindow",
+    # Canvas renderer exports
+    "CanvasRenderer",
 ]
