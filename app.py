@@ -47,6 +47,7 @@ from capture import (
     get_window_rect,
 )
 from services import SettingsManager, SnapshotService
+from pipeline import FramePipeline
 from ui.theme import (
     CLR_BG_ROOT,
     CLR_ACCENT,
@@ -139,12 +140,18 @@ class ZoomPlusApp:
         self.hotkey_mgr = GlobalHotkeyManager(self, poll_interval_ms=40)
         self.apply_preset("clean_board", update_sliders=True)
 
+        self.pipeline = FramePipeline(
+            capture_fn=self._pipeline_capture_fn,
+            process_fn=self._pipeline_process_fn,
+        )
+
         if not self.headless:
             self.load_settings()
 
         if self.headless:
             self.root.withdraw()
         else:
+            self.pipeline.start()
             self.root.after(50, self._video_tick)
             self.hotkey_mgr.start()
 
@@ -416,20 +423,71 @@ class ZoomPlusApp:
         if not self.headless:
             self._render_current_frame_to_canvas()
 
+    def _pipeline_capture_fn(self) -> Optional[Image.Image]:
+        return self.capture_manager.capture_frame()
+
+    def _pipeline_process_fn(self, raw_frame: Image.Image) -> Optional[Image.Image]:
+        if self.view_mode == "original":
+            return raw_frame
+        enhanced = self.enhancer.enhance(raw_frame, self.current_params)
+        if self.view_mode == "split":
+            return self.enhancer.create_comparison_view(
+                raw_frame, enhanced, self.split_ratio
+            )
+        return enhanced
+
     def _video_tick(self) -> None:
         if not self.overlay_visible:
             if not self.headless and self.root.winfo_exists():
                 self.root.after(200, self._video_tick)
             return
 
-        if not self.is_paused:
+        if not self.is_paused and hasattr(self, "pipeline") and self.pipeline.running:
+            item = self.pipeline.get_latest_frame()
+            if item is not None:
+                raw_frame, processed_frame = item
+                self._frame_seq += 1
+                self.current_frame_orig = raw_frame
+                self.current_frame_enhanced = (
+                    processed_frame if self.view_mode != "original" else None
+                )
+                self.current_processed_frame = processed_frame
+
+                if (
+                    self.current_frame_orig
+                    and self.current_frame_enhanced
+                    and (self.capture_manager.frame_count % 15 == 0)
+                ):
+                    m = self.enhancer.compute_metrics(
+                        self.current_frame_orig, self.current_frame_enhanced
+                    )
+                    self.latest_metrics = m
+                    self.stat_whiteness.set(
+                        f"⚪ הלבנת רקע: {m['background_whiteness_pct']}%"
+                    )
+                    self.stat_contrast.set(
+                        f"📊 ניגודיות: x{m['contrast_improvement']}"
+                    )
+                    self.stat_sharpness.set(
+                        f"✨ חדות: x{m['sharpness_improvement']}"
+                    )
+
+                fps = self.pipeline.process_fps or self.pipeline.capture_fps
+                self.stat_fps.set(f"⚡ {fps:.1f} FPS")
+                self.stat_latency.set(
+                    f"⏱️ לכידה: {self.pipeline.last_capture_ms:.1f}ms | עיבוד: {self.pipeline.last_process_ms:.1f}ms"
+                )
+
+                if not self.headless:
+                    self._render_current_frame_to_canvas()
+        elif not self.is_paused:
             try:
                 self.process_single_frame()
             except Exception as e:
                 logger.error(f"Frame error: {e}")
 
         if not self.headless and self.root.winfo_exists():
-            self.root.after(15, self._video_tick)
+            self.root.after(16, self._video_tick)
 
     # --- Presets & Parameters ---
 
@@ -764,6 +822,11 @@ class ZoomPlusApp:
             self.exit_snipping_tool_mode()
             return
         self.is_paused = not self.is_paused
+        if hasattr(self, "pipeline"):
+            if self.is_paused:
+                self.pipeline.pause()
+            else:
+                self.pipeline.resume()
         self.show_toast("⏸️ השידור הושהה" if self.is_paused else "▶️ שידור חי נמשך")
 
     # --- Snipping Tool & Anti-Mirror Safeguards ---
@@ -771,6 +834,8 @@ class ZoomPlusApp:
     def enter_snipping_tool_mode(self) -> None:
         self.capture_manager.anti_mirror_frozen = True
         self.is_paused = True
+        if hasattr(self, "pipeline"):
+            self.pipeline.pause()
         set_window_capture_passthrough(self.root, False)
         self.show_toast(
             "✂️ מסך הוקפא וגלוי ל-Win+Shift+S! לחץ רווח או F11 לחזרה לשידור חי"
@@ -780,6 +845,8 @@ class ZoomPlusApp:
         set_window_capture_passthrough(self.root, True)
         self.capture_manager.anti_mirror_frozen = False
         self.is_paused = False
+        if hasattr(self, "pipeline"):
+            self.pipeline.resume()
         self.show_toast("▶️ הגנת מניעת צילום שוחזרה - שידור חי נמשך")
 
     def toggle_snipping_tool_mode(self) -> None:
@@ -899,6 +966,8 @@ class ZoomPlusApp:
     def quit_app(self) -> None:
         try:
             self.save_settings()
+            if hasattr(self, "pipeline"):
+                self.pipeline.stop()
             self.hotkey_mgr.stop()
             if self.settings_window and self.settings_window.winfo_exists():
                 self.settings_window.destroy()

@@ -49,11 +49,17 @@ class WhiteboardEnhancer:
         self._dilate1_lut: List[int] = [min(255, int(i * 2.6)) for i in range(256)]
         self._shadow_135_lut: List[int] = [min(255, int(i * 1.35)) for i in range(256)]
 
-        # Pre-computed morphological structuring elements for OpenCV SIMD/GPU
+        # Pre-computed morphological structuring elements and LUTs for OpenCV SIMD/GPU
         if _CV2_AVAILABLE:
             self._k5_ellipse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             self._k_cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
             self._k3_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            self._lut_x9_arr = np.array(self._x9_lut, dtype=np.uint8)
+            self._lut_co_gate_arr = np.array(self._co_gate_exact_lut, dtype=np.uint8)
+            self._lut_cohesion_arr = np.array(self._cohesion_lut, dtype=np.uint8)
+            self._lut_has_ink_arr = np.array(self._has_ink_lut, dtype=np.uint8)
+            self._lut_glare_diff_arr = np.array(self._glare_diff_lut, dtype=np.uint8)
+            self._lut_shadow_arr = np.array(self._shadow_135_lut, dtype=np.uint8)
         else:
             self._k5_ellipse = None
             self._k_cross = None
@@ -137,6 +143,82 @@ class WhiteboardEnhancer:
                 ImageChops.lighter(ImageChops.lighter(bh2, bh3), bd2),
             ),
         ).filter(ImageFilter.BoxBlur(0.8))
+
+    def _compute_adaptive_gating(
+        self,
+        diff: Image.Image,
+        bg_env: Image.Image,
+        glare_zone: Image.Image,
+        pw: int,
+        ph: int,
+        shadow_suppression: float,
+    ) -> Image.Image:
+        """Hardware-accelerated 3x3 sum neighborhood gate, glare compensation, and shadow suppression."""
+        if _CV2_AVAILABLE:
+            try:
+                arr_diff = np.asarray(diff)
+                arr_glare = np.asarray(glare_zone)
+                if shadow_suppression > 0.05:
+                    w16, h16 = max(1, pw // 16), max(1, ph // 16)
+                    small_diff = cv2.resize(arr_diff, (w16, h16), interpolation=cv2.INTER_LINEAR)
+                    blurred_small = cv2.blur(small_diff, (5, 5))
+                    broad_cv = cv2.resize(blurred_small, (pw, ph), interpolation=cv2.INTER_LINEAR)
+                    if abs(shadow_suppression - 0.85) < 0.02:
+                        broad_scaled = cv2.LUT(broad_cv, self._lut_shadow_arr)
+                    else:
+                        lut_custom = np.array(
+                            [min(255, int(i * shadow_suppression * 1.58)) for i in range(256)],
+                            dtype=np.uint8,
+                        )
+                        broad_scaled = cv2.LUT(broad_cv, lut_custom)
+                    diff_clean = cv2.subtract(arr_diff, broad_scaled)
+                else:
+                    diff_clean = arr_diff
+
+                sum_3x3 = cv2.blur(cv2.LUT(diff_clean, self._lut_x9_arr), (3, 3))
+                co_gate = cv2.LUT(sum_3x3, self._lut_co_gate_arr)
+                cohesion_boost = cv2.LUT(sum_3x3, self._lut_cohesion_arr)
+                has_ink = cv2.LUT(diff_clean, self._lut_has_ink_arr)
+                cohesion_masked = cv2.multiply(cohesion_boost, has_ink, scale=1.0 / 255.0)
+                glare_boost = cv2.multiply(
+                    cv2.LUT(sum_3x3, self._lut_glare_diff_arr),
+                    arr_glare,
+                    scale=1.0 / 255.0,
+                )
+
+                boosted = cv2.add(diff_clean, cv2.add(cohesion_masked, glare_boost))
+                diff_adaptive = cv2.multiply(boosted, co_gate, scale=1.0 / 255.0)
+                return Image.fromarray(diff_adaptive)
+            except Exception:
+                pass
+
+        # Fallback to pure Pillow
+        if shadow_suppression > 0.05:
+            w16, h16 = max(1, pw // 16), max(1, ph // 16)
+            broad_diff = (
+                diff.resize((w16, h16), Image.Resampling.BILINEAR)
+                .filter(ImageFilter.BoxBlur(2))
+                .resize((pw, ph), Image.Resampling.BILINEAR)
+            )
+            if abs(shadow_suppression - 0.85) < 0.02:
+                broad_scaled = broad_diff.point(self._shadow_135_lut)
+            else:
+                broad_scaled = broad_diff.point(
+                    [min(255, int(i * shadow_suppression * 1.58)) for i in range(256)]
+                )
+            diff_clean = ImageChops.subtract(diff, broad_scaled)
+        else:
+            diff_clean = diff
+
+        sum_3x3 = diff_clean.point(self._x9_lut).filter(ImageFilter.BoxBlur(1))
+        co_gate = sum_3x3.point(self._co_gate_exact_lut)
+        cohesion_boost = sum_3x3.point(self._cohesion_lut)
+        cohesion_masked = ImageChops.multiply(cohesion_boost, diff_clean.point(self._has_ink_lut))
+        glare_boost = ImageChops.multiply(sum_3x3.point(self._glare_diff_lut), glare_zone)
+        return ImageChops.multiply(
+            ImageChops.add(diff_clean, ImageChops.add(cohesion_masked, glare_boost)),
+            co_gate,
+        )
 
     def _compute_instructor_mask(
         self,
@@ -278,32 +360,15 @@ class WhiteboardEnhancer:
             bg_env = self._cached_bg_env
             glare_zone = self._cached_glare_zone
 
-        # 4. Exact 3x3 Sum Neighborhood Gate, Glare Compensation & Shadow Suppression
+        # 4. Hardware-Accelerated Exact 3x3 Sum Neighborhood Gate, Glare & Shadow Suppression
         diff = ImageChops.subtract(bg_env, gray)
-        s_supp = float(getattr(params, "shadow_suppression", 0.85))
-        if s_supp > 0.05:
-            w16, h16 = max(1, pw // 16), max(1, ph // 16)
-            broad_diff = (
-                diff.resize((w16, h16), Image.Resampling.BILINEAR)
-                .filter(ImageFilter.BoxBlur(2))
-                .resize((pw, ph), Image.Resampling.BILINEAR)
-            )
-            if abs(s_supp - 0.85) < 0.02:
-                broad_scaled = broad_diff.point(self._shadow_135_lut)
-            else:
-                broad_scaled = broad_diff.point([min(255, int(i * s_supp * 1.58)) for i in range(256)])
-            diff_clean = ImageChops.subtract(diff, broad_scaled)
-        else:
-            diff_clean = diff
-
-        sum_3x3 = diff_clean.point(self._x9_lut).filter(ImageFilter.BoxBlur(1))
-        co_gate = sum_3x3.point(self._co_gate_exact_lut)
-        cohesion_boost = sum_3x3.point(self._cohesion_lut)
-        cohesion_masked = ImageChops.multiply(cohesion_boost, diff_clean.point(self._has_ink_lut))
-        glare_boost = ImageChops.multiply(sum_3x3.point(self._glare_diff_lut), glare_zone)
-        diff_adaptive = ImageChops.multiply(
-            ImageChops.add(diff_clean, ImageChops.add(cohesion_masked, glare_boost)),
-            co_gate,
+        diff_adaptive = self._compute_adaptive_gating(
+            diff=diff,
+            bg_env=bg_env,
+            glare_zone=glare_zone,
+            pw=pw,
+            ph=ph,
+            shadow_suppression=float(getattr(params, "shadow_suppression", 0.85)),
         )
 
         # 5. Pixel-Perfect 1:1 Direct Tone Mapping
@@ -385,8 +450,13 @@ class WhiteboardEnhancer:
             board_clean = Image.composite(ink_layer, bg_layer, ink_sharp)
         else:
             bg_layer = Image.new("RGB", (pw, ph), (255, 255, 255))
-            ink_scale = 0.35 if params.preset == "color_markers" else 0.14
-            ink_layer = work_img.point([int(i * ink_scale) for i in range(256)] * 3)
+            if params.preset == "color_markers":
+                # High-contrast non-linear color curve: boosts colored marker depth and saturation
+                marker_lut = [min(255, int(pow(i / 255.0, 1.35) * 125)) for i in range(256)] * 3
+                ink_layer = work_img.point(marker_lut)
+            else:
+                ink_scale = 0.14
+                ink_layer = work_img.point([int(i * ink_scale) for i in range(256)] * 3)
             board_clean = Image.composite(ink_layer, bg_layer, ink_sharp)
 
         # 9. Instructor Composite (retrieve result from worker core)
