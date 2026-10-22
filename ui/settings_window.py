@@ -219,7 +219,7 @@ class SettingsWindow(tk.Toplevel):
         card = tk.LabelFrame(parent, text="  פרופילים מוכנים (Presets)  ", font=FONT_BODY_BOLD, bg=CLR_BG_PANEL, fg=CLR_ACCENT, bd=1, relief="solid", padx=10, pady=8)
         card.pack(fill=tk.X, pady=(0, 10))
 
-        for key in ("clean_board", "ultra_bold", "color_markers", "dark_board", "raw_contrast"):
+        for key in ("clean_board", "ultra_bold", "color_markers", "dark_board", "custom", "raw_contrast"):
             info = PRESET_INFO.get(key, {})
             text = f"{info.get('icon', '✨')}  {info.get('name_he', key)}"
             btn = make_flat_button(card, text=text, command=lambda k=key: self.select_preset(k), bg=CLR_BG_CARD, fg=CLR_TEXT_PRIMARY, hover_bg=CLR_BORDER, font=FONT_BODY_BOLD, padx=8, pady=6)
@@ -288,11 +288,23 @@ class SettingsWindow(tk.Toplevel):
         btn_folder.pack(fill=tk.X, pady=2)
 
     def _build_reset_section(self, parent: tk.Widget) -> None:
+        btn_save = make_flat_button(
+            parent, text="💾 שמירת כל ההגדרות לפעם הבאה (Save Profile)", command=self.save_custom_settings,
+            bg=CLR_ACCENT_BG, fg=CLR_ACCENT, hover_bg=CLR_ACCENT_HOVER, font=FONT_BODY_BOLD, padx=12, pady=8
+        )
+        btn_save.pack(fill=tk.X, pady=(4, 4))
+
         btn_reset = make_flat_button(
             parent, text="🔄 איפוס להגדרות מומלצות (Reset)", command=self.reset_to_defaults,
-            bg=CLR_BG_CARD, fg=CLR_ACCENT, hover_bg=CLR_BORDER, font=FONT_BODY_BOLD, padx=12, pady=8
+            bg=CLR_BG_CARD, fg=CLR_TEXT_MUTED, hover_bg=CLR_BORDER, font=FONT_BODY, padx=12, pady=6
         )
-        btn_reset.pack(fill=tk.X, pady=(4, 10))
+        btn_reset.pack(fill=tk.X, pady=(2, 10))
+
+    def save_custom_settings(self) -> None:
+        if self.app is not None and hasattr(self.app, "save_custom_preset"):
+            self.app.save_custom_preset()
+        else:
+            self.select_preset("custom")
 
     def select_preset(self, preset_name: str) -> None:
         if preset_name not in PRESETS: return

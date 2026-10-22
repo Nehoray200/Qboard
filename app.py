@@ -553,8 +553,22 @@ class ZoomPlusApp:
         if self.settings_window and self.settings_window.winfo_exists(): self.settings_window.on_close()
         else: sw = SettingsWindow.open_or_focus(self.root, self); sw.attributes("-topmost", True); sw.lift(); sw.focus_force()
 
+    def save_custom_preset(self) -> None:
+        """Save current slider values & toggles as custom preset and persist for future launches."""
+        t_keys = ("fast_mode", "preserve_instructor", "invert_dark_mode", "denoise", "click_through", "trim_browser_header")
+        sliders = {k: self._slider_map[k][0].get() for k in self._slider_map}
+        toggles = {k: getattr(self, f"var_{k}").get() for k in t_keys if hasattr(self, f"var_{k}")}
+        p = self.current_params.copy(preset="custom", **sliders, **toggles)
+        PRESETS["custom"] = p
+        self.current_preset = "custom"
+        self.preset_desc_var.set(PRESET_INFO["custom"]["desc_he"])
+        self.save_settings()
+        self.show_toast("💾 ההגדרות נשמרו בהצלחה כפרופיל מותאם אישית לפעם הבאה!")
+        if self.settings_window and self.settings_window.winfo_exists():
+            self.settings_window.select_preset("custom")
+
     def cycle_next_preset(self) -> None:
-        keys = ("clean_board", "ultra_bold", "color_markers", "dark_board")
+        keys = ("clean_board", "ultra_bold", "color_markers", "dark_board", "custom")
         self.apply_preset(keys[(keys.index(self.current_preset) + 1) % len(keys)] if self.current_preset in keys else keys[0], update_sliders=True)
     def quick_snapshot(self) -> str:
         saved = self.save_snapshot(); self.show_toast(f"📸 נשמר צילום לוח [F8]: {os.path.basename(saved)}"); return saved
@@ -563,6 +577,9 @@ class ZoomPlusApp:
         try:
             with open(_SETTINGS_FILE, "r", encoding="utf-8") as f: d = json.load(f)
             if d.get("version") != 4: return
+            if "custom_preset" in d:
+                try: PRESETS["custom"] = EnhancementParams.from_dict(d["custom_preset"])
+                except Exception: pass
             if d.get("preset") in PRESETS: self.apply_preset(d["preset"], update_sliders=False)
             for k, v in d.get("sliders", {}).items():
                 if k in self._slider_map: var, lbl, fmt = self._slider_map[k]; var.set(v); lbl.set(fmt.format(v)); setattr(self.current_params, k, v)
@@ -587,8 +604,11 @@ class ZoomPlusApp:
         try:
             os.makedirs(os.path.dirname(_SETTINGS_FILE), exist_ok=True)
             t_keys = ("fast_mode", "preserve_instructor", "invert_dark_mode", "denoise", "click_through", "trim_browser_header")
-            d = {"version": 4, "preset": self.current_preset, "sliders": {k: self._slider_map[k][0].get() for k in self._slider_map},
-                 "toggles": {k: getattr(self, f"var_{k}").get() for k in t_keys if hasattr(self, f"var_{k}")},
+            sliders = {k: self._slider_map[k][0].get() for k in self._slider_map}
+            toggles = {k: getattr(self, f"var_{k}").get() for k in t_keys if hasattr(self, f"var_{k}")}
+            d = {"version": 4, "preset": self.current_preset, "sliders": sliders,
+                 "toggles": toggles,
+                 "custom_preset": PRESETS.get("custom", PRESETS["clean_board"]).to_dict(),
                  "last_source_type": self.active_source_type, "last_locked_geometry": self._last_locked_geometry}
             with open(_SETTINGS_FILE, "w", encoding="utf-8") as f: json.dump(d, f, indent=2)
         except Exception as e: logger.warning(f"Settings save: {e}")

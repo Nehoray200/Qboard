@@ -48,6 +48,7 @@ PRESETS: Dict[str, EnhancementParams] = {
     "ultra_bold": EnhancementParams(preset="ultra_bold", contrast=2.05, thickening=0.65, glare_removal=0.92, shadow_suppression=0.90, white_threshold=0.011, ink_saturation=0.115, gamma=1.18, sharpen=1.50, fast_mode=False, dual_sharpen=True),
     "color_markers": EnhancementParams(preset="color_markers", contrast=1.55, thickening=0.12, glare_removal=0.88, shadow_suppression=0.75, white_threshold=0.012, ink_saturation=0.155, gamma=1.08, sharpen=1.15, fast_mode=False, dual_sharpen=True),
     "dark_board": EnhancementParams(preset="dark_board", contrast=1.75, thickening=0.25, glare_removal=0.90, shadow_suppression=0.80, white_threshold=0.012, ink_saturation=0.140, gamma=1.14, sharpen=1.30, invert_dark_mode=True, fast_mode=False, dual_sharpen=True),
+    "custom": EnhancementParams(preset="custom", contrast=1.65, thickening=0.15, glare_removal=0.90, shadow_suppression=0.85, white_threshold=0.015, ink_saturation=0.145, gamma=1.12, sharpen=1.25, fast_mode=False, dual_sharpen=True),
     "raw_contrast": EnhancementParams(preset="raw_contrast", contrast=1.30, thickening=0.0, glare_removal=0.60, shadow_suppression=0.50, white_threshold=0.016, ink_saturation=0.175, gamma=1.02, sharpen=0.95, fast_mode=False, dual_sharpen=False),
 }
 
@@ -56,6 +57,7 @@ PRESET_INFO: Dict[str, Dict[str, str]] = {
     "ultra_bold": {"name_he": "כתב מודגש (טושים דהויים)", "icon": "🖊️", "desc_he": "חיזוק ועיבוי מבוקר של קווים דקים וטושים חלשים ללא מחיקת פרטים"},
     "color_markers": {"name_he": "טושים צבעוניים", "icon": "🎨", "desc_he": "שמירה והגברה של צבעי טושים על רקע לבן נקי וחלק"},
     "dark_board": {"name_he": "לוח כהה (Dark Mode)", "icon": "🌙", "desc_he": "היפוך מודרני למניעת עייפות עיניים - רקע כהה וכיתוב בהיר"},
+    "custom": {"name_he": "מותאם אישית", "icon": "⭐", "desc_he": "ההגדרות המותאמות אישית שלך שנשמרו לפעם הבאה"},
     "raw_contrast": {"name_he": "ניגודיות טבעית", "icon": "⚖️", "desc_he": "שיפור עדין וטבעי של ניגודיות ללא הלבנה אגרסיבית"},
 }
 
@@ -136,11 +138,14 @@ class WhiteboardEnhancer:
             return Image.new("L", (pw, ph), 255)
 
         skin = ImageChops.subtract(r, b).point(self._skin_lut)
-        w8, h8 = max(1, pw // 8), max(1, ph // 8)
-        g8 = gray.resize((w8, h8), Image.Resampling.BILINEAR)
-        dark8 = g8.point([min(255, max(0, (110 - i) * 6)) for i in range(256)])
-        dark_body = dark8.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(5)).resize((pw, ph), Image.Resampling.BILINEAR)
-        return ImageChops.lighter(skin, dark_body).point(lambda p: 255 if p >= 35 else 0)
+        # Tight zero-expansion opening in 4x space (MinFilter 3, MaxFilter 3)
+        # Eliminates the 30px dull gray halo around lecturer while preserving natural clothing and skin
+        w4, h4 = max(1, pw // 4), max(1, ph // 4)
+        g4 = gray.resize((w4, h4), Image.Resampling.BILINEAR)
+        dark4 = g4.point([255 if i < 95 else 0 for i in range(256)])
+        dark_body = dark4.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3)).resize((pw, ph), Image.Resampling.BILINEAR)
+        dark_body_tight = dark_body.point(lambda p: 255 if p >= 128 else 0)
+        return ImageChops.lighter(skin, dark_body_tight).point(lambda p: 255 if p >= 128 else 0)
 
     def _parallel_ssaa(self, diff_im: Image.Image, lut: List[int], pw: int, ph: int) -> Image.Image:
         n, pad = 4, 4
