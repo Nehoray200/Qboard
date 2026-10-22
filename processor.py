@@ -142,14 +142,21 @@ class WhiteboardEnhancer:
         # Threshold up to 130 captures the illuminated shirt completely without hollowing out
         w8, h8 = max(1, pw // 8), max(1, ph // 8)
         g8 = gray.resize((w8, h8), Image.Resampling.BILINEAR)
-        dark8 = g8.point([255 if i < 130 else 0 for i in range(256)])
+        g8_arr = np.asarray(g8)
+        dark_arr = np.where(g8_arr < 130, 255, 0).astype(np.uint8)
+        dark_arr[0:int(0.35 * h8), 0:int(0.12 * w8)] = 0
+        dark8 = Image.fromarray(dark_arr, mode="L")
 
         # Morphological opening (Min 3, Max 3 -> net 0 expansion):
         # Requires > 24px thickness (ink lines vanish, shirt & body 100% kept)
         dark_body = dark8.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3)).resize((pw, ph), Image.Resampling.BILINEAR)
         dark_body_tight = dark_body.point(lambda p: 255 if p >= 128 else 0)
 
-        return ImageChops.lighter(skin, dark_body_tight).point(lambda p: 255 if p >= 128 else 0)
+        skin_arr = np.array(skin)
+        skin_arr[0:int(0.35 * ph), 0:int(0.12 * pw)] = 0
+        skin_clean = Image.fromarray(skin_arr, mode="L")
+
+        return ImageChops.lighter(skin_clean, dark_body_tight).point(lambda p: 255 if p >= 128 else 0)
 
     def _parallel_ssaa(self, diff_im: Image.Image, lut: List[int], pw: int, ph: int) -> Image.Image:
         n, pad = 4, 4
