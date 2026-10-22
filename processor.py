@@ -44,11 +44,11 @@ class EnhancementParams:
 
 
 PRESETS: Dict[str, EnhancementParams] = {
-    "clean_board": EnhancementParams(preset="clean_board", contrast=1.65, thickening=0.15, glare_removal=0.90, shadow_suppression=0.85, white_threshold=0.015, ink_saturation=0.145, gamma=1.12, sharpen=1.25, fast_mode=False, dual_sharpen=True),
-    "ultra_bold": EnhancementParams(preset="ultra_bold", contrast=2.05, thickening=0.65, glare_removal=0.92, shadow_suppression=0.90, white_threshold=0.011, ink_saturation=0.115, gamma=1.18, sharpen=1.50, fast_mode=False, dual_sharpen=True),
+    "clean_board": EnhancementParams(preset="clean_board", contrast=1.80, thickening=0.18, glare_removal=0.90, shadow_suppression=0.85, white_threshold=0.010, ink_saturation=0.135, gamma=1.12, sharpen=1.25, fast_mode=False, dual_sharpen=True),
+    "ultra_bold": EnhancementParams(preset="ultra_bold", contrast=2.15, thickening=0.55, glare_removal=0.92, shadow_suppression=0.90, white_threshold=0.009, ink_saturation=0.110, gamma=1.18, sharpen=1.50, fast_mode=False, dual_sharpen=True),
     "color_markers": EnhancementParams(preset="color_markers", contrast=1.55, thickening=0.12, glare_removal=0.88, shadow_suppression=0.75, white_threshold=0.012, ink_saturation=0.155, gamma=1.08, sharpen=1.15, fast_mode=False, dual_sharpen=True),
     "dark_board": EnhancementParams(preset="dark_board", contrast=1.75, thickening=0.25, glare_removal=0.90, shadow_suppression=0.80, white_threshold=0.012, ink_saturation=0.140, gamma=1.14, sharpen=1.30, invert_dark_mode=True, fast_mode=False, dual_sharpen=True),
-    "custom": EnhancementParams(preset="custom", contrast=1.65, thickening=0.15, glare_removal=0.90, shadow_suppression=0.85, white_threshold=0.015, ink_saturation=0.145, gamma=1.12, sharpen=1.25, fast_mode=False, dual_sharpen=True),
+    "custom": EnhancementParams(preset="custom", contrast=1.80, thickening=0.18, glare_removal=0.90, shadow_suppression=0.85, white_threshold=0.010, ink_saturation=0.135, gamma=1.12, sharpen=1.25, fast_mode=False, dual_sharpen=True),
     "raw_contrast": EnhancementParams(preset="raw_contrast", contrast=1.30, thickening=0.0, glare_removal=0.60, shadow_suppression=0.50, white_threshold=0.016, ink_saturation=0.175, gamma=1.02, sharpen=0.95, fast_mode=False, dual_sharpen=False),
 }
 
@@ -76,7 +76,7 @@ class WhiteboardEnhancer:
         self._has_ink_lut: List[int] = [0 if d <= 3 else (140 if d == 4 else 255) for d in range(256)]
         self._cohesion_lut: List[int] = [0 if s <= 8 else min(10, (s - 7) // 3) for s in range(256)]
         self._co_gate_exact_lut: List[int] = [0 if s <= 6 else (140 if s == 7 else 255) for s in range(256)]
-        self._glare_zone_lut: List[int] = [min(255, max(0, (i - 172) * 6)) for i in range(256)]
+        self._glare_zone_lut: List[int] = [min(255, max(0, (i - 162) * 6)) for i in range(256)]
         self._glare_diff_lut: List[int] = [0 if s <= 6 else min(255, (s - 6) // 2) for s in range(256)]
         self._skin_lut: List[int] = [min(255, max(0, (i - 12) * 16)) for i in range(256)]
         self._dark_gate_lut: List[int] = [min(255, max(0, (128 - i) * 10)) for i in range(256)]
