@@ -129,11 +129,18 @@ class WhiteboardEnhancer:
         ).filter(ImageFilter.BoxBlur(0.8))
 
     def _compute_instructor_mask(self, r: Image.Image, b: Image.Image, gray: Image.Image, w4: int, h4: int, pw: int, ph: int) -> Image.Image:
-        g4 = gray.resize((w4, h4), Image.Resampling.BILINEAR)
+        # If the frame has a dark background (e.g. File Explorer, IDE, dark theme desktop),
+        # it is not a whiteboard; preserve 100% original sharpness with zero alteration.
+        g_small = gray.resize((64, 36), Image.Resampling.NEAREST)
+        if float(np.mean(np.array(g_small))) < 90.0:
+            return Image.new("L", (pw, ph), 255)
+
         skin = ImageChops.subtract(r, b).point(self._skin_lut)
-        dark_gate = g4.point(self._dark_gate_lut).filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3)).resize((pw, ph), Image.Resampling.BILINEAR)
-        dark = ImageChops.multiply(gray.point(self._dark_lut), dark_gate)
-        return ImageChops.lighter(skin, dark).filter(ImageFilter.BoxBlur(1)).point(self._dilate1_lut).filter(ImageFilter.BoxBlur(1))
+        w8, h8 = max(1, pw // 8), max(1, ph // 8)
+        g8 = gray.resize((w8, h8), Image.Resampling.BILINEAR)
+        dark8 = g8.point([min(255, max(0, (110 - i) * 6)) for i in range(256)])
+        dark_body = dark8.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(5)).resize((pw, ph), Image.Resampling.BILINEAR)
+        return ImageChops.lighter(skin, dark_body).point(lambda p: 255 if p >= 35 else 0)
 
     def _parallel_ssaa(self, diff_im: Image.Image, lut: List[int], pw: int, ph: int) -> Image.Image:
         n, pad = 4, 4
@@ -211,7 +218,7 @@ class WhiteboardEnhancer:
         else:
             self._cache_age, self.last_frame_was_cached = 0, False
 
-        if params.denoise: src_img = src_img.filter(ImageFilter.BoxBlur(0.7))
+        # Never blur src_img with BoxBlur; preserve 100% original pixel sharpness
         # Always maintain 100% native resolution to prevent blurriness and quality loss
         if max_process_width is not None and w > max_process_width and max_process_width >= 1920:
             pw = max_process_width; ph = max(1, int(round(h * (pw / w))))
@@ -258,14 +265,9 @@ class WhiteboardEnhancer:
         glare_boost = ImageChops.multiply(sum_3x3.point(self._glare_diff_lut), glare_zone)
         diff_adaptive = ImageChops.multiply(ImageChops.add(diff_clean, ImageChops.add(cohesion_masked, glare_boost)), co_gate)
 
-        # 5. Multi-Core Parallel 2x SSAA Natural Grayscale Tone Mapping
+        # 5. Pixel-Perfect 1:1 Direct Tone Mapping (Maximum Native Edge Sharpness)
         lut = self._get_ink_lut(params.white_threshold, params.ink_saturation, params.gamma, params.contrast)
-        if not params.fast_mode and pw >= 768:
-            ink_soft = self._parallel_ssaa(diff_adaptive, lut, pw, ph)
-        elif not params.fast_mode:
-            ink_soft = diff_adaptive.resize((pw * 2, ph * 2), Image.Resampling.BICUBIC).point(lut).resize((pw, ph), Image.Resampling.BILINEAR)
-        else:
-            ink_soft = diff_adaptive.point(lut)
+        ink_soft = diff_adaptive.point(lut)
 
         # 6. Controlled Proportional Stroke Thickening (Preserves Interior Gaps)
         thickening = float(np.clip(params.thickening, 0.0, 2.0))
