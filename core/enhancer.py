@@ -1,6 +1,6 @@
 """
 Core real-time Whiteboard Image Enhancement Engine (Engine V4).
-Multi-Core Parallel + Sub-Macroblock Symmetric Bridge + Glare Roll-Off Recovery & Natural Grayscale.
+Hardware-accelerated C-SIMD / OpenCL + Sub-Macroblock Symmetric Bridge + Glare Roll-Off Recovery & Natural Grayscale.
 """
 
 from __future__ import annotations
@@ -11,6 +11,14 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Tuple, List, Optional
 import numpy as np
 from PIL import Image, ImageFilter, ImageChops, ImageDraw
+
+try:
+    import cv2
+    if cv2.ocl.haveOpenCL():
+        cv2.ocl.setUseOpenCL(True)
+    _CV2_AVAILABLE = True
+except Exception:
+    _CV2_AVAILABLE = False
 
 from core.params import EnhancementParams, PRESETS
 from core.instructor_mask import InstructorMaskComputer
@@ -27,7 +35,7 @@ class WhiteboardEnhancer:
         self.num_workers: int = min(6, os.cpu_count() or 4)
         self._pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=self.num_workers)
 
-        # Lookup tables for fast SIMD-like PIL point transforms
+        # Lookup tables for fast SIMD point transforms
         self._ink_lut_cache: Dict[Tuple[int, int, float, float], List[int]] = {}
         self._x9_lut: List[int] = [min(255, i * 9) for i in range(256)]
         self._has_ink_lut: List[int] = [0 if d <= 3 else (140 if d == 4 else 255) for d in range(256)]
@@ -40,6 +48,16 @@ class WhiteboardEnhancer:
         self._dark_lut: List[int] = [min(255, max(0, (132 - i) * 8)) for i in range(256)]
         self._dilate1_lut: List[int] = [min(255, int(i * 2.6)) for i in range(256)]
         self._shadow_135_lut: List[int] = [min(255, int(i * 1.35)) for i in range(256)]
+
+        # Pre-computed morphological structuring elements for OpenCV SIMD/GPU
+        if _CV2_AVAILABLE:
+            self._k5_ellipse = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            self._k_cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+            self._k3_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        else:
+            self._k5_ellipse = None
+            self._k_cross = None
+            self._k3_rect = None
 
         # Dedicated sub-components
         self._mask_computer = InstructorMaskComputer(self._skin_lut)
@@ -89,9 +107,21 @@ class WhiteboardEnhancer:
             self._ink_lut_cache[key] = lut
         return lut
 
-    @staticmethod
-    def _sub_macroblock_bridge(gray: Image.Image) -> Image.Image:
-        """Construct illumination background bridge using directional min/max offsets."""
+    def _sub_macroblock_bridge(self, gray: Image.Image) -> Image.Image:
+        """
+        Construct illumination background bridge using hardware-accelerated morphology.
+        Bridges over dark ink lines to recover smooth paper/board background illumination.
+        """
+        if _CV2_AVAILABLE:
+            try:
+                arr = np.asarray(gray)
+                closed = cv2.morphologyEx(arr, cv2.MORPH_CLOSE, self._k5_ellipse)
+                smoothed = cv2.blur(closed, (2, 2))
+                return Image.fromarray(smoothed)
+            except Exception:
+                pass
+
+        # Fallback to pure Pillow directional bridge
         bv2 = ImageChops.darker(ImageChops.offset(gray, 0, -2), ImageChops.offset(gray, 0, 2))
         bv4 = ImageChops.darker(ImageChops.offset(gray, 0, -4), ImageChops.offset(gray, 0, 4))
         bh2 = ImageChops.darker(ImageChops.offset(gray, -2, 0), ImageChops.offset(gray, 2, 0))
@@ -121,29 +151,6 @@ class WhiteboardEnhancer:
         """Worker thread entry point for instructor mask calculation."""
         return self._mask_computer.compute_mask(r, b, gray, pw, ph)
 
-    def _parallel_ssaa(self, diff_im: Image.Image, lut: List[int], pw: int, ph: int) -> Image.Image:
-        """Parallel sub-sampled antialiasing across worker threads."""
-        n, pad = 4, 4
-
-        def _worker(i: int):
-            sy0, sy1 = i * ph // n, (i + 1) * ph // n
-            cy0, cy1 = max(0, sy0 - pad), min(ph, sy1 + pad)
-            crop = diff_im.crop((0, cy0, pw, cy1))
-            ch = cy1 - cy0
-            proc = (
-                crop.resize((pw * 2, ch * 2), Image.Resampling.BICUBIC)
-                .point(lut)
-                .resize((pw, ch), Image.Resampling.BILINEAR)
-            )
-            top = sy0 - cy0
-            return (sy0, proc.crop((0, top, pw, top + (sy1 - sy0))))
-
-        strips = list(self._pool.map(_worker, range(n)))
-        out = Image.new("L", (pw, ph))
-        for sy0, s in strips:
-            out.paste(s, (0, sy0))
-        return out
-
     def detect_whiteboard_bbox(self, img: Image.Image) -> Tuple[float, float, float, float]:
         """Detect whiteboard normalized coordinates in frame."""
         return self._board_detector.detect_bbox(img)
@@ -158,7 +165,7 @@ class WhiteboardEnhancer:
         Main whiteboard enhancement pipeline:
         1. Fast resolution check & delta-frame temporal caching
         2. Concurrent Instructor Mask detection
-        3. Background illumination envelope & glare compensation
+        3. Background illumination envelope & glare compensation (SIMD / GPU accelerated)
         4. Directional sum-neighborhood gating & shadow suppression
         5. Tone mapping & edge sharpening
         6. Clean paper-white compositing
@@ -308,28 +315,63 @@ class WhiteboardEnhancer:
         )
         ink_soft = diff_adaptive.point(lut)
 
-        # 6. Controlled Proportional Stroke Thickening
+        # 6. Controlled Proportional Stroke Thickening (Hardware-accelerated)
         thickening = float(np.clip(params.thickening, 0.0, 2.0))
         if thickening > 0.25:
-            s_r = ImageChops.offset(ink_soft, 1, 0)
-            s_l = ImageChops.offset(ink_soft, -1, 0)
-            s_d = ImageChops.offset(ink_soft, 0, 1)
-            s_u = ImageChops.offset(ink_soft, 0, -1)
-            d4 = ImageChops.lighter(
-                ink_soft,
-                ImageChops.lighter(ImageChops.lighter(s_r, s_l), ImageChops.lighter(s_d, s_u)),
-            )
-            if thickening <= 1.2:
-                ink_final = Image.blend(ink_soft, d4, min(0.65, (thickening - 0.20) * 0.45))
+            if _CV2_AVAILABLE:
+                try:
+                    arr_ink = np.asarray(ink_soft)
+                    d4_arr = cv2.dilate(arr_ink, self._k_cross)
+                    if thickening <= 1.2:
+                        alpha = min(0.65, (thickening - 0.20) * 0.45)
+                        ink_final_arr = cv2.addWeighted(arr_ink, 1.0 - alpha, d4_arr, alpha, 0)
+                    else:
+                        d4_max = cv2.dilate(d4_arr, self._k3_rect)
+                        alpha = (thickening - 1.2) * 0.35
+                        ink_final_arr = cv2.addWeighted(d4_arr, 1.0 - alpha, d4_max, alpha, 0)
+                    ink_final = Image.fromarray(ink_final_arr)
+                except Exception:
+                    # Pillow fallback
+                    s_r = ImageChops.offset(ink_soft, 1, 0)
+                    s_l = ImageChops.offset(ink_soft, -1, 0)
+                    s_d = ImageChops.offset(ink_soft, 0, 1)
+                    s_u = ImageChops.offset(ink_soft, 0, -1)
+                    d4 = ImageChops.lighter(
+                        ink_soft,
+                        ImageChops.lighter(ImageChops.lighter(s_r, s_l), ImageChops.lighter(s_d, s_u)),
+                    )
+                    ink_final = Image.blend(ink_soft, d4, min(0.65, (thickening - 0.20) * 0.45))
             else:
-                ink_final = Image.blend(d4, d4.filter(ImageFilter.MaxFilter(3)), (thickening - 1.2) * 0.35)
+                s_r = ImageChops.offset(ink_soft, 1, 0)
+                s_l = ImageChops.offset(ink_soft, -1, 0)
+                s_d = ImageChops.offset(ink_soft, 0, 1)
+                s_u = ImageChops.offset(ink_soft, 0, -1)
+                d4 = ImageChops.lighter(
+                    ink_soft,
+                    ImageChops.lighter(ImageChops.lighter(s_r, s_l), ImageChops.lighter(s_d, s_u)),
+                )
+                if thickening <= 1.2:
+                    ink_final = Image.blend(ink_soft, d4, min(0.65, (thickening - 0.20) * 0.45))
+                else:
+                    ink_final = Image.blend(d4, d4.filter(ImageFilter.MaxFilter(3)), (thickening - 1.2) * 0.35)
         else:
             ink_final = ink_soft
 
-        # 7. Halo-Free Micro-Sharpening
-        pct_sharp = int(round(params.sharpen * (42 if getattr(params, "dual_sharpen", True) else 32)))
+        # 7. Halo-Free Micro-Sharpening (Hardware-accelerated)
+        pct_sharp = params.sharpen * (0.42 if getattr(params, "dual_sharpen", True) else 0.32)
         if params.sharpen > 0.05:
-            ink_sharp = ink_final.filter(ImageFilter.UnsharpMask(radius=0.65, percent=pct_sharp, threshold=1))
+            if _CV2_AVAILABLE:
+                try:
+                    arr_ink = np.asarray(ink_final)
+                    blurred = cv2.GaussianBlur(arr_ink, (3, 3), 0.65)
+                    sharp_arr = cv2.addWeighted(arr_ink, 1.0 + pct_sharp, blurred, -pct_sharp, 0)
+                    ink_sharp = Image.fromarray(sharp_arr)
+                except Exception:
+                    pct_int = int(round(pct_sharp * 100))
+                    ink_sharp = ink_final.filter(ImageFilter.UnsharpMask(radius=0.65, percent=pct_int, threshold=1))
+            else:
+                pct_int = int(round(pct_sharp * 100))
+                ink_sharp = ink_final.filter(ImageFilter.UnsharpMask(radius=0.65, percent=pct_int, threshold=1))
         else:
             ink_sharp = ink_final
 
