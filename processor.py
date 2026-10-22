@@ -138,13 +138,17 @@ class WhiteboardEnhancer:
             return Image.new("L", (pw, ph), 255)
 
         skin = ImageChops.subtract(r, b).point(self._skin_lut)
-        # Tight zero-expansion opening in 4x space (MinFilter 3, MaxFilter 3)
-        # Eliminates the 30px dull gray halo around lecturer while preserving natural clothing and skin
-        w4, h4 = max(1, pw // 4), max(1, ph // 4)
-        g4 = gray.resize((w4, h4), Image.Resampling.BILINEAR)
-        dark4 = g4.point([255 if i < 95 else 0 for i in range(256)])
-        dark_body = dark4.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3)).resize((pw, ph), Image.Resampling.BILINEAR)
+        # 8x macro space for solid human silhouette (shirt, torso, limbs)
+        # Threshold up to 130 captures the illuminated shirt completely without hollowing out
+        w8, h8 = max(1, pw // 8), max(1, ph // 8)
+        g8 = gray.resize((w8, h8), Image.Resampling.BILINEAR)
+        dark8 = g8.point([255 if i < 130 else 0 for i in range(256)])
+
+        # Morphological opening (Min 3, Max 3 -> net 0 expansion):
+        # Requires > 24px thickness (ink lines vanish, shirt & body 100% kept)
+        dark_body = dark8.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3)).resize((pw, ph), Image.Resampling.BILINEAR)
         dark_body_tight = dark_body.point(lambda p: 255 if p >= 128 else 0)
+
         return ImageChops.lighter(skin, dark_body_tight).point(lambda p: 255 if p >= 128 else 0)
 
     def _parallel_ssaa(self, diff_im: Image.Image, lut: List[int], pw: int, ph: int) -> Image.Image:
