@@ -24,6 +24,7 @@ from core.params import EnhancementParams, PRESETS
 from core.instructor_mask import InstructorMaskComputer
 from core.board_detector import BoardDetector
 from core.metrics import MetricsCalculator
+from core.chunk_grid import ChunkGridManager
 
 
 class WhiteboardEnhancer:
@@ -82,6 +83,13 @@ class WhiteboardEnhancer:
         self._cached_white_bg: Optional[Image.Image] = None
         self._cached_dark_bg: Optional[Image.Image] = None
         self._ink_scale_lut: List[int] = [int(i * 0.14) for i in range(256)] * 3
+
+        # Persistent tiled chunk canvas
+        self._chunk_grid: ChunkGridManager = ChunkGridManager(chunk_size=128)
+        self._tiled_canvas: Optional[np.ndarray] = None
+        self._tiled_canvas_key: Optional[Tuple] = None
+        self.last_dirty_chunks: int = 0
+        self.total_chunks: int = 0
 
     def _get_ink_lut(
         self,
@@ -333,6 +341,35 @@ class WhiteboardEnhancer:
             else None
         )
 
+        # 3-8. Enhance Whiteboard Layer
+        board_clean = self._enhance_board_layer(work_img, gray, params, pw, ph)
+
+        # 9. Instructor Composite
+        if inst_mask is not None:
+            out = Image.composite(work_img, board_clean, inst_mask)
+        else:
+            out = board_clean
+
+        if params.fast_mode:
+            self._last_enhanced_out = out
+            self._last_params_key = params_key
+            self._cache_age = 0
+
+        self.last_processing_time_ms = (time.perf_counter() - t_start) * 1000.0
+        return out
+
+    def _enhance_board_layer(
+        self,
+        work_img: Image.Image,
+        gray: Image.Image,
+        params: EnhancementParams,
+        pw: int,
+        ph: int,
+    ) -> Image.Image:
+        """Core tone-mapping, gating, and enhancement of the whiteboard layer."""
+        w4, h4 = max(1, pw // 4), max(1, ph // 4)
+        w8, h8 = max(1, pw // 8), max(1, ph // 8)
+
         # 3. Sub-Macroblock Symmetric Bridge Envelope (Cached for 8 frames if static)
         env_key = (pw, ph, round(params.glare_removal, 2))
         need_env = (
@@ -399,7 +436,6 @@ class WhiteboardEnhancer:
                         ink_final_arr = cv2.addWeighted(d4_arr, 1.0 - alpha, d4_max, alpha, 0)
                     ink_final = Image.fromarray(ink_final_arr)
                 except Exception:
-                    # Pillow fallback
                     s_r = ImageChops.offset(ink_soft, 1, 0)
                     s_l = ImageChops.offset(ink_soft, -1, 0)
                     s_d = ImageChops.offset(ink_soft, 0, 1)
@@ -465,16 +501,104 @@ class WhiteboardEnhancer:
                 ink_layer = work_img.point(self._ink_scale_lut)
             board_clean = Image.composite(ink_layer, bg_layer, ink_sharp)
 
-        # 9. Instructor Composite
-        if inst_mask is not None:
-            out = Image.composite(work_img, board_clean, inst_mask)
-        else:
-            out = board_clean
+        return board_clean
 
-        if params.fast_mode:
-            self._last_enhanced_out = out
-            self._last_params_key = params_key
-            self._cache_age = 0
+    def reset_tiled_canvas(self) -> None:
+        """Reset persistent tiled canvas to force a clean full-board refresh."""
+        self._tiled_canvas = None
+        self._tiled_canvas_key = None
+        self._chunk_grid.reset()
+
+    def enhance_tiled(
+        self,
+        img: Image.Image,
+        params: Optional[EnhancementParams] = None,
+        max_process_width: Optional[int] = None,
+    ) -> Image.Image:
+        """
+        Tile-based dirty-chunk enhancement pipeline:
+        1. Maintains persistent high-resolution board canvas.
+        2. Detects dirty chunks outside the lecturer mask.
+        3. Only re-enhances dirty chunks (or full refresh if >= 40% dirty).
+        4. Composites live lecturer from fresh frame at zero lag.
+        """
+        t_start = time.perf_counter()
+        if params is None:
+            params = PRESETS["clean_board"]
+
+        w, h = img.size
+        if w < 16 or h < 16:
+            self.last_processing_time_ms = 0.0
+            return img.convert("RGB") if img.mode != "RGB" else img.copy()
+
+        src_img = img.convert("RGB") if img.mode != "RGB" else img
+
+        if max_process_width is not None and w > max_process_width and max_process_width >= 1920:
+            pw = max_process_width
+            ph = max(1, int(round(h * (pw / w))))
+            work_img = src_img.resize((pw, ph), Image.Resampling.BILINEAR)
+        else:
+            pw, ph = w, h
+            work_img = src_img
+
+        work_arr = np.asarray(work_img)
+        gray_arr = cv2.cvtColor(work_arr, cv2.COLOR_RGB2GRAY) if _CV2_AVAILABLE else np.asarray(work_img.convert("L"))
+        gray_img = Image.fromarray(gray_arr)
+        r, g, b = work_img.split()
+        w4, h4 = max(1, pw // 4), max(1, ph // 4)
+
+        # 1. Compute live instructor mask (SIMD, ~4.7ms)
+        inst_mask_img = (
+            self._compute_instructor_mask(r, b, gray_img, w4, h4, pw, ph)
+            if params.preserve_instructor
+            else None
+        )
+        inst_mask_arr = np.asarray(inst_mask_img) if inst_mask_img is not None else np.zeros((ph, pw), dtype=np.uint8)
+
+        # 2. Check canvas state
+        canvas_key = (
+            pw, ph, params.preset, params.invert_dark_mode,
+            round(params.contrast, 3), round(params.thickening, 3),
+            round(params.white_threshold, 4), round(params.ink_saturation, 4),
+        )
+        need_full_init = (
+            self._tiled_canvas is None
+            or self._tiled_canvas_key != canvas_key
+            or self._tiled_canvas.shape[:2] != (ph, pw)
+        )
+
+        # 3. Find dirty chunks
+        roi, dirty_count, total = self._chunk_grid.find_dirty_roi(
+            gray=gray_arr,
+            inst_mask=inst_mask_arr,
+            force_full=need_full_init,
+        )
+        self.last_dirty_chunks = dirty_count
+        self.total_chunks = total
+
+        # 4. Enhance dirty region
+        if need_full_init or dirty_count >= int(total * 0.40) or self._tiled_canvas is None:
+            board_clean = self._enhance_board_layer(work_img, gray_img, params, pw, ph)
+            self._tiled_canvas = np.asarray(board_clean).copy()
+            self._tiled_canvas_key = canvas_key
+        elif roi is not None:
+            x1, y1, x2, y2 = roi
+            roi_img = work_img.crop((x1, y1, x2, y2))
+            roi_gray = gray_img.crop((x1, y1, x2, y2))
+            roi_w, roi_h = x2 - x1, y2 - y1
+            roi_clean = self._enhance_board_layer(roi_img, roi_gray, params, roi_w, roi_h)
+            self._tiled_canvas[y1:y2, x1:x2] = np.asarray(roi_clean)
+
+        # 5. Fast composite live lecturer over persistent clean board
+        if inst_mask_img is not None and _CV2_AVAILABLE:
+            out_arr = self._tiled_canvas.copy()
+            cv2.copyTo(work_arr, inst_mask_arr, out_arr)
+            out = Image.fromarray(out_arr)
+        elif inst_mask_img is not None:
+            canvas_img = Image.fromarray(self._tiled_canvas)
+            out = Image.composite(work_img, canvas_img, inst_mask_img)
+        else:
+            out = Image.fromarray(self._tiled_canvas)
 
         self.last_processing_time_ms = (time.perf_counter() - t_start) * 1000.0
         return out

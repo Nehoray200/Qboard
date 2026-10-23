@@ -385,7 +385,7 @@ class ZoomPlusApp:
             self.current_frame_enhanced = None
             self.current_processed_frame = raw_frame
         else:
-            self.current_frame_enhanced = self.enhancer.enhance(
+            self.current_frame_enhanced = self.enhancer.enhance_tiled(
                 raw_frame, self.current_params
             )
             if self.view_mode == "split":
@@ -410,8 +410,13 @@ class ZoomPlusApp:
 
         stats = self.capture_manager.get_stats()
         self.stat_fps.set(f"⚡ {stats['fps']} FPS")
+        dirty_info = (
+            f" | מקטעים: {self.enhancer.last_dirty_chunks}/{self.enhancer.total_chunks}"
+            if getattr(self.enhancer, "total_chunks", 0) > 0
+            else ""
+        )
         self.stat_latency.set(
-            f"⏱️ לכידה: {stats['latency_ms']:.1f}ms | עיבוד: {self.enhancer.last_processing_time_ms:.1f}ms"
+            f"⏱️ לכידה: {stats['latency_ms']:.1f}ms | עיבוד: {self.enhancer.last_processing_time_ms:.1f}ms{dirty_info}"
         )
 
         if not self.headless:
@@ -452,6 +457,8 @@ class ZoomPlusApp:
             return
         self.current_preset = preset_name
         self.current_params = PRESETS[preset_name].copy()
+        if hasattr(self, "enhancer"):
+            self.enhancer.reset_tiled_canvas()
         info = PRESET_INFO.get(preset_name, {})
         self.preset_desc_var.set(info.get("desc_he", ""))
 
@@ -768,6 +775,8 @@ class ZoomPlusApp:
 
     def set_board_crop(self, crop_norm: Optional[Tuple[float, float, float, float]]) -> None:
         self.capture_manager.set_board_crop(crop_norm)
+        if hasattr(self, "enhancer"):
+            self.enhancer.reset_tiled_canvas()
 
     def reset_board_crop(self) -> None:
         self.set_board_crop(None)

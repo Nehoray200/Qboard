@@ -14,6 +14,7 @@ import time
 import ctypes
 from ctypes import wintypes
 from typing import Dict, Any
+import numpy as np
 
 from processor import (
     WhiteboardEnhancer,
@@ -69,6 +70,35 @@ def run_self_test() -> int:
         )
         assert enhanced.size == frame0.size, f"Size mismatch in {key}"
         assert metrics["contrast_improvement"] >= 0.85, f"Contrast didn't improve in {key}"
+
+    # 2b. Test Tile-Based Chunk Enhancement
+    print("\n[2b/6] Verifying tile-based chunk grid manager & persistent canvas...")
+    from core.chunk_grid import ChunkGridManager
+    grid_mgr = ChunkGridManager(chunk_size=128)
+    h0, w0 = frame0.height, frame0.width
+    arr0 = np.asarray(frame0.convert("L"))
+    m0 = np.zeros_like(arr0)
+    roi_init, dirty_init, total_chunks = grid_mgr.find_dirty_roi(arr0, m0, force_full=True)
+    assert dirty_init == total_chunks, "Initial frame must mark all chunks dirty"
+    assert roi_init == (0, 0, w0, h0)
+
+    # Static second frame should have 0 dirty chunks
+    roi_static, dirty_static, _ = grid_mgr.find_dirty_roi(arr0, m0)
+    assert dirty_static == 0, f"Identical frame had dirty chunks: {dirty_static}"
+    assert roi_static is None
+
+    # Test enhance_tiled pipeline
+    t_tile0 = time.perf_counter()
+    enh_tiled1 = enhancer.enhance_tiled(frame0, PRESETS["clean_board"])
+    dt_tile1 = (time.perf_counter() - t_tile0) * 1000.0
+    assert enh_tiled1.size == frame0.size
+
+    # Second tiled pass on static frame (should reuse canvas and be ultra-fast)
+    t_tile1 = time.perf_counter()
+    enh_tiled2 = enhancer.enhance_tiled(frame0, PRESETS["clean_board"])
+    dt_tile2 = (time.perf_counter() - t_tile1) * 1000.0
+    print(f"      ✓ enhance_tiled init: {dt_tile1:.1f}ms | static cached tick: {dt_tile2:.1f}ms (dirty chunks: {enhancer.last_dirty_chunks}/{enhancer.total_chunks})")
+    assert enh_tiled2.size == frame0.size
 
     # 3. Save Demo Validation Images
     print("\n[3/6] Generating sample demonstration output images...")

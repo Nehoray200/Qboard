@@ -16,6 +16,7 @@ from core.enhancer import WhiteboardEnhancer
 from core.board_detector import BoardDetector
 from core.instructor_mask import InstructorMaskComputer
 from core.metrics import MetricsCalculator
+from core.chunk_grid import ChunkGridManager
 
 _default_enhancer = WhiteboardEnhancer()
 
@@ -46,6 +47,7 @@ __all__ = [
     "BoardDetector",
     "InstructorMaskComputer",
     "MetricsCalculator",
+    "ChunkGridManager",
     "detect_whiteboard_bbox",
     "enhance_whiteboard",
 ]
